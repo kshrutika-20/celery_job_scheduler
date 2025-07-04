@@ -1,164 +1,182 @@
 import os
 import logging
-from datetime import datetime, timedelta
-
+import uuid
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-load_dotenv(dotenv_path='.env')
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.mongodb import MongoDBJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
-from job_definitions import JOB_DEFINITIONS  # <-- IMPORTING from Python file
+from job_definitions import JOB_DEFINITIONS
 from custom_functions import JOB_FUNCTIONS
+from pymongo import MongoClient
 
-# Build a lookup table from job ID to function name
-JOB_ID_TO_FUNCTION = {
-    job["id"]: job["function"]
-    for job in JOB_DEFINITIONS
-    if "function" in job
-}
+load_dotenv(dotenv_path='.env')
 
+
+# This function must be at the top level to be pickleable by APScheduler.
 def task_wrapper(job_id: str):
     """
-    A wrapper function that is the actual target for every APScheduler job.
+    A robust wrapper that manages the full lifecycle of a job run,
+    including status tracking and traceability.
     It retrieves job details and calls the mapped function.
     """
-    logging.info(f"Task wrapper executing for job_id: {job_id}")
+    trace_id = str(uuid.uuid4())
+    mongo_client = None
 
-    func_name = JOB_ID_TO_FUNCTION.get(job_id)
-    if not func_name:
-        logging.error(f"No function name defined for job_id: {job_id}.")
-        return
-
-    func = JOB_FUNCTIONS.get(func_name)
-    if not func:
-        logging.error(f"No function found in JOB_FUNCTIONS for name: {func_name}")
-        return
-
+    # Establish a new MongoDB client for this job run to ensure process/thread safety.
     try:
-        func()
+        host = os.getenv("MONGO_HOST", "localhost")
+        port = int(os.getenv("MONGO_PORT", 27017))
+        db_name = os.getenv("MONGO_DB", "apscheduler_db")
+
+        if os.getenv("MONGO_USER") and os.getenv("MONGO_PASS"):
+            uri = f"mongodb://{os.getenv('MONGO_USER')}:{os.getenv('MONGO_PASS')}@{host}:{port}/{db_name}?authSource=admin"
+            mongo_client = MongoClient(uri)
+        else:
+            mongo_client = MongoClient(host, port)
+
+        status_collection = mongo_client[db_name].job_statuses
+
+        # 1. Push a new "Running" status to the history array.
+        # This also creates the document if it doesn't exist.
+        # We use $slice to keep the history array bounded to the last 50 runs.
+        logging.info(f"[{trace_id}] Task wrapper executing for job_id: {job_id}")
+        run_record = {
+            "trace_id": trace_id,
+            "status": "Running",
+            "timestamp_utc": datetime.now(timezone.utc),
+            "exception": None
+        }
+        status_collection.update_one(
+            {"job_id": job_id},
+            {
+                "$push": {
+                    "history": {
+                        "$each": [run_record],
+                        "$slice": -50
+                    }
+                },
+                "$set": {"job_id": job_id}  # Ensure job_id is set on upsert
+            },
+            upsert=True
+        )
+
+        # 2. Execute the actual job function
+        job_id_to_function = {job["id"]: job["function"] for job in JOB_DEFINITIONS if "function" in job}
+        func_name = job_id_to_function.get(job_id)
+        if not func_name:
+            raise ValueError(f"No function name defined for job_id: {job_id}")
+
+        func = JOB_FUNCTIONS.get(func_name)
+        if not func:
+            raise ValueError(f"No function found in JOB_FUNCTIONS for name: {func_name}")
+
+        result = func(trace_id=trace_id)
+        if not result:
+            raise Exception("The triggered API call or custom function reported a failure.")
+
+        # 3. If successful, update the status of the current run to "Success"
+        status_collection.update_one(
+            {"job_id": job_id, "history.trace_id": trace_id},
+            {"$set": {
+                "history.$.status": "Success",
+                "history.$.end_timestamp_utc": datetime.now(timezone.utc)
+            }}
+        )
+
     except Exception as e:
-        logging.error(f"Execution failed for job_id: {job_id}. Error: {e}")
+        logging.error(f"[{trace_id}] Execution failed for job_id: {job_id}. Error: {e}")
+        # 4. If any exception occurs, update the status to "Failure"
+        if mongo_client:
+            status_collection = mongo_client[os.getenv("MONGO_DB", "apscheduler_db")].job_statuses
+            status_collection.update_one(
+                {"job_id": job_id, "history.trace_id": trace_id},
+                {"$set": {
+                    "history.$.status": "Failure",
+                    "history.$.end_timestamp_utc": datetime.now(timezone.utc),
+                    "history.$.exception": str(e)
+                }}
+            )
+    finally:
+        # 5. Always close the client connection
+        if mongo_client:
+            mongo_client.close()
+
 
 class SchedulerManager:
-    """
-    Manages the lifecycle of the APScheduler, loads jobs from a configuration file,
-    and handles job dependencies.
-    """
+    """Manages the lifecycle of the APScheduler instance."""
 
-    def __init__(self, db_path: str = 'sqlite:///jobs.sqlite'):
+    def __init__(self):
         """
-        Initializes the SchedulerManager.
-
-        Args:
-            db_path (str): Database connection string for the job store.
-        """
+            Initializes the SchedulerManager.
+            """
         self.job_definitions = self._load_job_definitions()
+        self.mongo_client = self._get_mongo_client()
         self.scheduler = self._initialize_scheduler()
+
+    def _get_mongo_client(self):
+        host = os.getenv("MONGO_HOST", "localhost")
+        port = int(os.getenv("MONGO_PORT", 27017))
+        db_name = os.getenv("MONGO_DB", "apscheduler_db")
+        if os.getenv("MONGO_USER") and os.getenv("MONGO_PASS"):
+            uri = f"mongodb://{os.getenv('MONGO_USER')}:{os.getenv('MONGO_PASS')}@{host}:{port}/{db_name}?authSource=admin"
+            return MongoClient(uri)
+        return MongoClient(host, port)
 
     def _load_job_definitions(self) -> dict:
         """Loads job definitions from the imported JOBS list."""
-        logging.info("Loading job definitions from job_definitions.py module")
-        # Convert the list of jobs to a dictionary for easy lookup by job ID
         return {job['id']: job for job in JOB_DEFINITIONS}
 
     def _initialize_scheduler(self) -> BackgroundScheduler:
         """Configures and initializes the BackgroundScheduler."""
-        logging.info("Initializing scheduler with MongoDB job store...")
-
-        mongo_config = {
-            "host": os.getenv("MONGO_HOST", "localhost"),
-            "port": int(os.getenv("MONGO_PORT", 27017)),
-            "database": os.getenv("MONGO_DB", "apscheduler_db"),
-            "collection": os.getenv("MONGO_COLLECTION", "jobs")
-        }
-
-        # Optional: Add authentication if credentials are set
-        if os.getenv("MONGO_USER") and os.getenv("MONGO_PASS"):
-            mongo_config["username"] = os.getenv("MONGO_USER")
-            mongo_config["password"] = os.getenv("MONGO_PASS")
-
-        jobstores = {
-            'default': MongoDBJobStore(**mongo_config)
-        }
-        executors = {
-            'default': ThreadPoolExecutor(20),
-            'processpool': ProcessPoolExecutor(5)
-        }
-        job_defaults = {
-            'coalesce': False,  # Run every instance of a job
-            'max_instances': 1  # Default to 1 to prevent overlap
-        }
-        scheduler = BackgroundScheduler(
-            jobstores=jobstores,
-            executors=executors,
-            job_defaults=job_defaults,
-            timezone='UTC'
-        )
+        db_name = os.getenv("MONGO_DB", "apscheduler_db")
+        collection_name = os.getenv("MONGO_COLLECTION", "jobs")
+        jobstores = {'default': MongoDBJobStore(database=db_name, collection=collection_name, client=self.mongo_client)}
+        executors = {'default': ThreadPoolExecutor(20), 'processpool': ProcessPoolExecutor(5)}
+        job_defaults = {'coalesce': False, 'max_instances': 1}
+        scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults,
+                                        timezone='UTC')
         scheduler.add_listener(self.job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
         return scheduler
 
     def job_event_listener(self, event):
         """Listens for job execution events to handle logging and dependencies."""
-        job = self.scheduler.get_job(event.job_id)
-        if not job:
-            logging.warning(f"Event received for a non-existent job_id: {event.job_id}")
-            return
-
         if event.exception:
-            logging.error(f"Job {event.job_id} crashed: {event.exception}")
+            logging.error(
+                f"APScheduler-level error for job {event.job_id}. This might be a serialization or configuration issue. Error: {event.exception}")
         else:
-            logging.info(f"Job {event.job_id} executed successfully.")
-            # Check if this job has any dependents
+            logging.info(f"APScheduler successfully triggered job {event.job_id}.")
             self._trigger_dependent_jobs(event.job_id)
 
     def _trigger_dependent_jobs(self, parent_job_id: str):
         """
-        Finds and schedules jobs that depend on the successfully completed parent job.
-        """
+            Finds and schedules jobs that depend on the successfully completed parent job.
+            """
         for job_id, job_def in self.job_definitions.items():
-            if job_def.get('depends_on') == parent_job_id:
-                logging.info(f"Parent job '{parent_job_id}' completed. Triggering dependent job '{job_id}'.")
-                self.scheduler.modify_job(job_id,
-                                          next_run_time=datetime.now(self.scheduler.timezone) + timedelta(seconds=1))
+            if parent_job_id in job_def.get('dependencies', []):
+                self.scheduler.modify_job(
+                    job_id, next_run_time=datetime.now(timezone.utc) + timedelta(seconds=1)
+                )
 
     def schedule_all_jobs(self):
         """
-        Reads all job definitions and adds/updates them in the scheduler.
-        Expects job format to have 'trigger' as a string and 'trigger_args' as a dict.
-        """
-        logging.info("Scheduling all jobs from definitions...")
-        existing_job_ids = {job.id for job in self.scheduler.get_jobs()}
-        defined_job_ids = set(self.job_definitions.keys())
-
+            Reads all job definitions and adds/updates them in the scheduler.
+            Expects job format to have 'trigger' as a string and 'trigger_args' as a dict.
+            """
         for job_id, job_def in self.job_definitions.items():
-            try:
-                trigger_type = job_def['trigger']
-                trigger_args = job_def.get('trigger_args', {})
-
-                job_kwargs = {
-                    'id': job_id,
-                    'name': job_def.get('description', job_id),
-                    'func': task_wrapper,
-                    'args': [job_id],
-                    'trigger': trigger_type,
-                    'executor': job_def.get('executor', 'default'),
-                    'max_instances': job_def.get('max_instances', 1),
-                    'replace_existing': True,
-                    **trigger_args
-                }
-
-                self.scheduler.add_job(**job_kwargs)
-                logging.info(f"Scheduled job '{job_id}' with trigger: {trigger_type} and args: {trigger_args}")
-
-            except Exception as e:
-                logging.error(f"Failed to schedule job '{job_id}': {e}")
-
-        # Remove obsolete jobs no longer defined
-        for job_id in existing_job_ids - defined_job_ids:
-            logging.info(f"Removing obsolete job '{job_id}' from scheduler.")
-            self.scheduler.remove_job(job_id)
+            job_kwargs = {
+                'id': job_id,
+                'name': job_def.get('name', job_id),
+                'func': 'scheduler_core:task_wrapper',
+                'args': [job_id],
+                'trigger': job_def['trigger'],
+                'executor': job_def.get('executor', 'default'),
+                'max_instances': job_def.get('max_instances', 1),
+                'replace_existing': True,
+                **job_def.get('trigger_args', {})
+            }
+            self.scheduler.add_job(**job_kwargs)
 
     def start(self):
         """Starts the scheduler."""
