@@ -1,4 +1,5 @@
 import requests
+import logging
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -45,6 +46,11 @@ async def pause_job_endpoint(job_id: str):
 async def resume_job_endpoint(job_id: str):
     """Forwards a resume command to the scheduler pod."""
     return forward_request_to_scheduler("post", f"/control/resume/{job_id}")
+
+@app.post("/api/jobs/{job_id}/trigger")
+async def trigger_job_endpoint(job_id: str):
+    """Forwards a trigger command to the scheduler pod."""
+    return forward_request_to_scheduler("post", f"/control/trigger/{job_id}")
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job_endpoint(job_id: str):

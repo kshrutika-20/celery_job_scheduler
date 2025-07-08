@@ -39,40 +39,50 @@
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
-                        {% for job in jobs %}
-                        <tr>
-                            <td class="px-6 py-4 whitespace-nowrap">
-                                <div class="flex items-center">
-                                    {% if job.ui_status == 'Running' %}
-                                        <i class="fas fa-sync fa-spin text-purple-600 mr-2"></i>
-                                    {% else %}
-                                        <span class="status-dot status-{{ job.ui_status.lower() }}"></span>
-                                    {% endif %}
-                                    <span class="text-sm font-medium text-gray-900">{{ job.ui_status }}</span>
-                                </div>
-                            </td>
-                            <td class="px-6 py-4 whitespace-nowrap">
-                                <div class="text-sm font-semibold text-gray-900">{{ job.name }}</div>
-                                <div class="text-xs text-gray-500">{{ job.id }}</div>
-                            </td>
-                            <td class="px-6 py-4 whitespace-nowrap">
-                                <div class="text-sm text-gray-900">{{ job.next_run_time_human }}</div>
-                                <div class="text-xs text-gray-500">{{ job.next_run_time_utc.split('.')[0] }}Z</div>
-                            </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{{ job.trigger }}</td>
-                            <td class="px-6 py-4 whitespace-nowrap">
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full
-                                    {{ 'bg-green-100 text-green-800' if job.last_status == 'Success' else 'bg-red-100 text-red-800' if job.last_status == 'Failure' else 'bg-gray-100 text-gray-800' }}">
-                                    {{ job.last_status }}
-                                </span>
-                            </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                <button onclick="manageJob('{{ job.id }}', 'pause')" class="text-yellow-600 hover:text-yellow-900 mr-3" title="Pause"><i class="fas fa-pause-circle fa-lg"></i></button>
-                                <button onclick="manageJob('{{ job.id }}', 'resume')" class="text-green-600 hover:text-green-900 mr-3" title="Resume"><i class="fas fa-play-circle fa-lg"></i></button>
-                                <button onclick="manageJob('{{ job.id }}', 'delete')" class="text-red-600 hover:text-red-900" title="Delete"><i class="fas fa-trash-alt fa-lg"></i></button>
-                            </td>
-                        </tr>
-                        {% endfor %}
+                        {% if jobs %}
+                            {% for job in jobs %}
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex items-center">
+                                        {% if job.ui_status == 'Running' %}
+                                            <i class="fas fa-sync fa-spin text-purple-600 mr-2"></i>
+                                        {% else %}
+                                            <span class="status-dot status-{{ job.ui_status.lower() }}"></span>
+                                        {% endif %}
+                                        <span class="text-sm font-medium text-gray-900">{{ job.ui_status }}</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-semibold text-gray-900">{{ job.name }}</div>
+                                    <div class="text-xs text-gray-500">{{ job.id }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm text-gray-900">{{ job.next_run_time_human }}</div>
+                                    <div class="text-xs text-gray-500">{{ job.next_run_time_utc.split('.')[0] }}Z</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{{ job.trigger }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full
+                                        {{ 'bg-green-100 text-green-800' if job.last_status == 'Success' else 'bg-red-100 text-red-800' if job.last_status == 'Failure' else 'bg-gray-100 text-gray-800' }}">
+                                        {{ job.last_status }}
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                    <button onclick="manageJob('{{ job.id }}', 'trigger')" class="text-blue-600 hover:text-blue-900 mr-3" title="Trigger Now"><i class="fas fa-bolt fa-lg"></i></button>
+                                    <button onclick="manageJob('{{ job.id }}', 'pause')" class="text-yellow-600 hover:text-yellow-900 mr-3" title="Pause"><i class="fas fa-pause-circle fa-lg"></i></button>
+                                    <button onclick="manageJob('{{ job.id }}', 'resume')" class="text-green-600 hover:text-green-900 mr-3" title="Resume"><i class="fas fa-play-circle fa-lg"></i></button>
+                                    <button onclick="manageJob('{{ job.id }}', 'delete')" class="text-red-600 hover:text-red-900" title="Delete"><i class="fas fa-trash-alt fa-lg"></i></button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="6" class="text-center py-10 px-6 text-gray-500">
+                                    <p class="text-lg">No jobs found.</p>
+                                    <p class="text-sm mt-1">Ensure the scheduler is running and connected to the correct database.</p>
+                                </td>
+                            </tr>
+                        {% endif %}
                     </tbody>
                 </table>
             </div>
@@ -93,8 +103,11 @@
                 const response = await fetch(url, { method: method });
                 const result = await response.json();
                 if (response.ok) {
-                    alert(result.message);
-                    location.reload();
+                    alert(result.message || `Job '${jobId}' ${result.status}.`);
+                    // Don't reload for trigger, as it's a one-off action
+                    if (action !== 'trigger') {
+                        location.reload();
+                    }
                 } else {
                     alert(`Error: ${result.detail}`);
                 }
