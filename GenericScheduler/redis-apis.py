@@ -148,3 +148,18 @@ async def get_cluster_memory():
             }
         else:
             raise HTTPException(status_code=response.status_code, detail=response.text)
+
+@router.get("/redis/stats/raw")
+async def get_raw_stats():
+    url = f"{REDIS_ENTERPRISE_API_URL}/v1/bdbs/stats/last"
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.get(
+                url, auth=(REDIS_ENTERPRISE_API_USERNAME, REDIS_ENTERPRISE_API_PASSWORD)
+            )
+            return {
+                "status_code": response.status_code,
+                "response": response.json()
+            }
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Connection error: {str(e)}")
