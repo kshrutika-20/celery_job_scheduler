@@ -1,3 +1,48 @@
+from fastapi import APIRouter, HTTPException
+import httpx
+import os
+
+router = APIRouter()
+
+REDIS_ENTERPRISE_API_URL = os.getenv("REDIS_ENTERPRISE_API_URL", "https://your-redis-url:9443")
+REDIS_ENTERPRISE_API_USERNAME = os.getenv("REDIS_ENTERPRISE_API_USERNAME", "your-username")
+REDIS_ENTERPRISE_API_PASSWORD = os.getenv("REDIS_ENTERPRISE_API_PASSWORD", "your-password")
+
+
+@router.get("/redis/stats", summary="Fetch latest Redis DB stats")
+async def get_redis_stats():
+    """
+    Fetches real-time memory and performance stats for all Redis databases.
+    """
+    url = f"{REDIS_ENTERPRISE_API_URL}/v1/bdbs/stats/last"
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.get(url, auth=(REDIS_ENTERPRISE_API_USERNAME, REDIS_ENTERPRISE_API_PASSWORD))
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail=f"Failed to fetch stats: {response.text}")
+
+            raw_stats = response.json().get("bdbs", [])
+
+            formatted_stats = []
+            for db in raw_stats:
+                formatted_stats.append({
+                    "name": db.get("name"),
+                    "used_memory_mb": round(db.get("used_memory", 0) / (1024 ** 2), 2),
+                    "used_memory_peak_mb": round(db.get("used_memory_peak", 0) / (1024 ** 2), 2),
+                    "used_memory_rss_mb": round(db.get("used_memory_rss", 0) / (1024 ** 2), 2),
+                    "ops_per_sec": db.get("ops"),
+                    "avg_latency_ms": round(db.get("avg_latency", 0), 2),
+                    "throughput_bytes_sec": db.get("throughput"),
+                    "connected_clients": db.get("clients")
+                })
+
+            return formatted_stats
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"Connection error: {str(e)}")
+
+
 @router.get("/memory/usage")
 async def get_memory_usage():
     """
