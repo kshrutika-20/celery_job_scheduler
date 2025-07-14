@@ -1,15 +1,7 @@
-import time
-import sys
-import logging
-import threading
-import uvicorn
 import uuid
 from fastapi import FastAPI, HTTPException
 from scheduler_core import SchedulerManager
-from config import settings
 
-# --- Main Scheduler Application ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 scheduler_manager = SchedulerManager()
 
 # --- Internal Control API ---
@@ -71,32 +63,3 @@ def remove(job_id: str):
 def run_control_api():
     """Runs the internal control API in a separate thread."""
     uvicorn.run(control_app, host="0.0.0.0", port=9001)
-
-
-# --- Main Entry Point ---
-def main():
-    """Main function to run the scheduler and its control API."""
-    try:
-        # Start the control API in a background thread
-        control_api_thread = threading.Thread(target=run_control_api, daemon=True)
-        control_api_thread.start()
-        logging.info("Internal control API started on port 9001.")
-
-        # Schedule initial jobs and start the main scheduler loop
-        scheduler_manager.schedule_all_jobs()
-        scheduler_manager.start()
-        print("Scheduler is running. Press Ctrl+C to exit.")
-
-        # Keep the main thread alive
-        control_api_thread.join()
-
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Shutdown signal received.")
-    finally:
-        if scheduler_manager:
-            scheduler_manager.shutdown()
-        logging.info("Scheduler shut down successfully.")
-
-
-if __name__ == "__main__":
-    main()
