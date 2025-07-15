@@ -6,7 +6,7 @@
 # 4. job_definitions.py
 # 5. api_caller.py
 # 6. custom_functions.py
-# 7. conceptual_celery_worker.py (NEW - For Reference)
+# 7. conceptual_celery_worker.py (For Reference)
 # 8. scheduler_core.py
 # 9. scheduler_client.py
 # 10. api_server.py
@@ -71,7 +71,7 @@ def get_mongo_client() -> MongoClient:
 
 
 # ==============================================================================
-# File: redis_coordinator.py (MODIFIED)
+# File: redis_coordinator.py
 # Description: Manages distributed counters and pub/sub events for task coordination.
 # ==============================================================================
 import redis
@@ -110,7 +110,7 @@ class RedisCoordinator:
             redis.call('DEL', completed_key, total_key)
             return 1
         end
-        return 0
+        return completed
         """
         self.finisher_script = self.redis.register_script(lua_script)
 
@@ -143,13 +143,12 @@ class RedisCoordinator:
 
 
 # ==============================================================================
-# File: job_definitions.py (MODIFIED)
+# File: job_definitions.py
 # Description: Defines the jobs to be scheduled.
 # ==============================================================================
 JOB_DEFINITIONS = [
     {"id": "start_repo_ingestion_workflow", "name": "Start Repo Ingestion Workflow", "trigger": "cron",
      "trigger_args": {"hour": 1}, "function": "start_repo_ingestion_workflow"},
-    # 'fetch_labels' is triggered programmatically by the pub/sub listener, not on a schedule.
     {"id": "fetch_labels", "name": "Fetch All Labels", "function": "fetch_labels"},
 ]
 
@@ -176,58 +175,41 @@ def trigger_api_call(url: str, method: str, trace_id: str, headers: dict = None,
 
 
 # ==============================================================================
-# File: custom_functions.py (MODIFIED)
+# File: custom_functions.py
 # Description: The functions for the scheduler's jobs.
 # ==============================================================================
 import logging
 from api_caller import trigger_api_call
 from config import settings
-from database import get_mongo_client
 
 
 def fetch_all_repos_from_mongo(workflow_id: str):
-    """MOCK: In production, this would query MongoDB for all repos from a specific run."""
     logging.info(f"[{workflow_id}] Gathering all repo data from MongoDB to start label fetching.")
-    # Example: return [{"name": "repo-1"}, {"name": "repo-2"}]
     return []
 
 
 def start_repo_ingestion_workflow(trace_id: str):
     """
-    The initial scheduler job. Its only responsibility is to call the Producer API
-    to kick off the distributed workflow, passing the trace_id.
+    Calls the Producer API to kick off the distributed workflow, passing the trace_id.
     """
     logging.info(f"[{trace_id}] Calling Producer to start repo ingestion workflow.")
     producer_url = f"{settings.PRODUCER_API_URL}/produce/fetch-repos"
-
-    # The Producer API is now responsible for getting the repo list and enqueuing tasks.
-    # We pass our trace_id to it, which it will use as the workflow_id.
     return trigger_api_call(
-        url=producer_url,
-        method="POST",
-        trace_id=trace_id,
-        json_data={"workflow_id": trace_id}  # Pass the trace_id explicitly
+        url=producer_url, method="POST", trace_id=trace_id,
+        json_data={"workflow_id": trace_id}
     )
 
 
 def fetch_labels(trace_id: str):
     """
-    This job is triggered by the Pub/Sub listener. It gathers the results of the
-    previous workflow and starts the next one.
+    Triggered by the Pub/Sub listener. Gathers results and starts the next workflow.
     """
     logging.info(f"[{trace_id}] All repos processed. Now starting fetch_labels workflow.")
-
-    # 1. Gather all the repo data that was just ingested.
     repos_data = fetch_all_repos_from_mongo(workflow_id=trace_id)
-
-    # 2. Call the Producer API again to start the next fan-out process for labels.
     producer_url = f"{settings.PRODUCER_API_URL}/produce/fetch-labels"
     logging.info(f"[{trace_id}] Calling producer to start label ingestion for {len(repos_data)} repos.")
-
     return trigger_api_call(
-        url=producer_url,
-        method="POST",
-        trace_id=trace_id,  # Propagate the original trace_id
+        url=producer_url, method="POST", trace_id=trace_id,
         json_data={"repos": repos_data, "workflow_id": trace_id}
     )
 
@@ -238,49 +220,41 @@ JOB_FUNCTIONS = {
 }
 
 # ==============================================================================
-# File: conceptual_celery_worker.py (NEW - FOR REFERENCE)
+# File: conceptual_celery_worker.py (For Reference)
 # Description: Shows how the Celery worker and signal handler would be implemented.
-# THIS FILE DOES NOT RUN IN THE SCHEDULER POD. It runs in your separate Celery Worker pod.
 # ==============================================================================
 # from celery import Celery
 # from celery.signals import task_success
 # from redis_coordinator import RedisCoordinator
-# from config import settings # Assuming workers have access to config
+# from config import settings
 
-# # This would be your actual Celery app instance
 # celery_app = Celery('tasks', broker=settings.REDIS_URL)
 
 # @celery_app.task(bind=True)
 # def process_single_repo(self, repo_url: str, workflow_id: str):
 #     """
-#     This is the core task that does the work for one repository.
+#     The core task that does the work for one repository.
 #     The `workflow_id` is passed in its arguments.
 #     """
 #     logging.info(f"[{workflow_id}] Worker processing repo: {repo_url}")
-#     # ... your actual logic to fetch data from Bitbucket ...
-#     # ... and save it to MongoDB ...
-#     # If something fails here, an exception will be raised, and the
-#     # `task_success` signal will NOT fire, which is what we want.
+#     # ... your actual logic to fetch data from Bitbucket and save it to MongoDB ...
 #     return {"status": "success", "repo": repo_url}
 
 # @task_success.connect(sender=process_single_repo)
-# def on_repo_process_success(sender=None, result=None, **kwargs):
+# def on_repo_process_success(sender=None, **kwargs):
 #     """
-
 #     This signal handler runs automatically after any `process_single_repo`
-#     task completes successfully.
+#     task completes successfully. It increments the Redis counter.
 #     """
 #     # The task's original arguments are in the sender's request context.
-#     args = sender.request.args
-#     kwargs = sender.request.kwargs
-#     workflow_id = kwargs.get('workflow_id') or (args[1] if len(args) > 1 else None)
+#     task_kwargs = sender.request.kwargs
+#     workflow_id = task_kwargs.get('workflow_id')
 
 #     if not workflow_id:
-#         logging.error("Could not find workflow_id in successful task signal.")
+#         logging.error("Could not find workflow_id in successful task signal's kwargs.")
 #         return
 
 #     logging.info(f"Success signal received for task in workflow [{workflow_id}]")
-#     # Increment the counter for the completed workflow.
 #     redis_coord = RedisCoordinator()
 #     redis_coord.increment(workflow_id=workflow_id)
 
@@ -303,9 +277,7 @@ from config import settings
 
 def task_wrapper(job_id: str, *args):
     trace_id = str(uuid.uuid4())
-    # If a trace_id is passed from the listener, use it instead.
-    if args:
-        trace_id = args[0]
+    if args: trace_id = args[0]
 
     mongo_client = None
     try:
@@ -359,7 +331,7 @@ class SchedulerManager:
 
     def schedule_all_jobs(self):
         for job_id, job_def in self.job_definitions.items():
-            if 'trigger' in job_def:  # Only schedule jobs with triggers
+            if 'trigger' in job_def:
                 job_kwargs = {'id': job_id, 'name': job_def.get('name', job_id), 'func': 'scheduler_core:task_wrapper',
                               'args': [job_id], 'trigger': job_def['trigger'],
                               'executor': job_def.get('executor', 'default'),
@@ -375,8 +347,8 @@ class SchedulerManager:
 
 
 # ==============================================================================
-# File: scheduler_client.py
-# Description: A client to interact with the MongoDB job store for READ-ONLY operations. (No changes)
+# File: scheduler_client.py (MODIFIED)
+# Description: A client to interact with the MongoDB job store for READ-ONLY operations.
 # ==============================================================================
 from datetime import datetime
 import pendulum
@@ -400,6 +372,7 @@ class SchedulerClient:
             status_info = statuses.get(job.id, {})
             last_run = status_info.get("history", [{}])[-1]
             last_status = last_run.get("status", "Unknown")
+
             if job.next_run_time is None:
                 ui_status = "Paused"
             elif last_status == "Running":
@@ -408,18 +381,23 @@ class SchedulerClient:
                 ui_status = "Failing"
             else:
                 ui_status = "Scheduled"
-            job_list.append({"id": job.id, "name": job.name,
-                             "next_run_time_utc": job.next_run_time.isoformat() if job.next_run_time else "N/A",
-                             "next_run_time_human": pendulum.instance(
-                                 job.next_run_time).diff_for_humans() if job.next_run_time else "Paused",
-                             "trigger": str(job.trigger), "last_status": last_status,
-                             "last_run_utc": last_run.get("timestamp_utc", "N/A"), "ui_status": ui_status})
+
+            job_list.append({
+                "id": job.id, "name": job.name,
+                "next_run_time_utc": job.next_run_time.isoformat() if job.next_run_time else "N/A",
+                "next_run_time_human": pendulum.instance(
+                    job.next_run_time).diff_for_humans() if job.next_run_time else "Paused",
+                "trigger": str(job.trigger), "last_status": last_status,
+                "last_run_utc": last_run.get("timestamp_utc", "N/A"),
+                "ui_status": ui_status,
+                "last_workflow_id": last_run.get("trace_id")  # Expose the last workflow ID
+            })
         return job_list
 
 
 # ==============================================================================
-# File: api_server.py
-# Description: The public-facing FastAPI server for the combined pod. (No changes)
+# File: api_server.py (MODIFIED)
+# Description: The public-facing FastAPI server for the combined pod.
 # ==============================================================================
 import logging
 import uuid
@@ -456,9 +434,10 @@ async def read_root(request: Request):
 async def get_jobs(): return client.get_all_jobs()
 
 
-@app.get("/api/progress/{job_id}")
-async def get_job_progress(job_id: str):
-    return redis_coord.get_progress(job_id)
+@app.get("/api/progress/{workflow_id}")
+async def get_job_progress(workflow_id: str):
+    """Correctly uses the unique workflow_id to get progress."""
+    return redis_coord.get_progress(workflow_id)
 
 
 @app.post("/api/jobs/{job_id}/pause")
@@ -545,3 +524,4 @@ fastapi_app.router.lifespan_context = lifespan
 if __name__ == "__main__":
     print("Starting combined Scheduler and API server...")
     uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+
