@@ -144,11 +144,47 @@ logger = get_logger(__name__)
 class RedisCoordinator:
     """
     Manages counters and publishes completion events using Redis.
+    Uses a Lua script for atomic increment-and-check operations.
     """
 
     def __init__(self, redis_url: str = settings.REDIS_URL):
         self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
         self.completion_channel = "workflow_completion_events"
+        self._register_scripts()
+
+    def _register_scripts(self):
+        """Registers Lua scripts for atomic operations."""
+        # This script atomically increments a counter (succeeded or failed) and
+        # checks if the total processed count has reached the expected total.
+        # If it has, it publishes a completion message.
+        lua_script = """
+        local key_to_incr = KEYS[1]
+        local succeeded_key = KEYS[2]
+        local failed_key = KEYS[3]
+        local total_key = KEYS[4]
+        local channel = ARGV[1]
+        local workflow_id = ARGV[2]
+
+        -- Ensure the workflow hasn't already been completed/cleaned up
+        if redis.call('EXISTS', total_key) == 0 then
+            return 0
+        end
+
+        redis.call('INCR', key_to_incr)
+
+        local succeeded = tonumber(redis.call('GET', succeeded_key))
+        local failed = tonumber(redis.call('GET', failed_key))
+        local total = tonumber(redis.call('GET', total_key))
+
+        if total > 0 and (succeeded + failed) >= total then
+            -- Publish only on the first time completion is detected
+            if redis.call('PUBLISH', channel, workflow_id) > 0 then
+                return 1 -- Signal completion was just published
+            end
+        end
+        return 0 -- Signal in-progress
+        """
+        self.finisher_script = self.redis.register_script(lua_script)
 
     def init_counter(self, workflow_id: str, total_count: int, job_id: str):
         logger.info(f"Initializing Redis counter for job '{job_id}'.", workflow_id=workflow_id, total_items=total_count)
@@ -159,31 +195,30 @@ class RedisCoordinator:
         pipe.set(f"workflow_info:{workflow_id}", job_id, ex=settings.REDIS_COUNTER_TTL_SECONDS)
         pipe.execute()
 
-    def _check_completion(self, workflow_id: str):
-        """Checks if all tasks for a workflow are done and publishes if so."""
-        pipe = self.redis.pipeline()
-        pipe.get(f"counter:{workflow_id}:succeeded")
-        pipe.get(f"counter:{workflow_id}:failed")
-        pipe.get(f"counter:{workflow_id}:total")
-        succeeded, failed, total = pipe.execute()
+    def _increment(self, workflow_id: str, counter_type: str):
+        """Internal method to call the atomic Lua script."""
+        key_to_incr = f"counter:{workflow_id}:{counter_type}"
+        succeeded_key = f"counter:{workflow_id}:succeeded"
+        failed_key = f"counter:{workflow_id}:failed"
+        total_key = f"counter:{workflow_id}:total"
 
-        succeeded = int(succeeded or 0)
-        failed = int(failed or 0)
-        total = int(total or 0)
-
-        if total > 0 and (succeeded + failed) >= total:
-            logger.info("Final sub-task completed. Publishing completion event.", workflow_id=workflow_id)
-            self.redis.publish(self.completion_channel, workflow_id)
+        try:
+            result = self.finisher_script(
+                keys=[key_to_incr, succeeded_key, failed_key, total_key],
+                args=[self.completion_channel, workflow_id]
+            )
+            if result == 1:
+                logger.info("Final sub-task completed. Published completion event.", workflow_id=workflow_id)
+        except redis.exceptions.ResponseError as e:
+            logger.error(f"Lua script error for workflow.", workflow_id=workflow_id, error=str(e))
 
     def increment_success(self, workflow_id: str):
         """Atomically increments the success counter."""
-        self.redis.incr(f"counter:{workflow_id}:succeeded")
-        self._check_completion(workflow_id)
+        self._increment(workflow_id, "succeeded")
 
     def increment_failure(self, workflow_id: str):
         """Atomically increments the failure counter."""
-        self.redis.incr(f"counter:{workflow_id}:failed")
-        self._check_completion(workflow_id)
+        self._increment(workflow_id, "failed")
 
     def get_progress(self, workflow_id: str) -> dict:
         """Gets the current progress of a fan-out job."""
