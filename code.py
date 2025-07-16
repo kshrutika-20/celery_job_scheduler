@@ -1,5 +1,5 @@
 # ==============================================================================
-# File: requirements.txt (NEW)
+# File: requirements.txt
 # Description: Lists all project dependencies.
 # ==============================================================================
 # fastapi
@@ -36,7 +36,7 @@ PRODUCER_API_URL = http: // localhost: 8001
 
 
 # ==============================================================================
-# File: scheduler_app/utils/config.py (MODIFIED)
+# File: scheduler_app/utils/config.py
 # Description: Centralized configuration management using Pydantic.
 # ==============================================================================
 from pydantic_settings import BaseSettings
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # ==============================================================================
-# File: scheduler_app/utils/logger.py (NEW)
+# File: scheduler_app/utils/logger.py
 # Description: Sets up a structured, application-wide logger.
 # ==============================================================================
 import logging
@@ -88,14 +88,10 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "name": record.name,
         }
-        # Add extra context if it exists
         if hasattr(record, 'context'):
             log_record.update(record.context)
-
-        # Add exception info if it exists
         if record.exc_info:
             log_record['exception'] = self.formatException(record.exc_info)
-
         return json.dumps(log_record)
 
 
@@ -104,26 +100,19 @@ def get_logger(name: str, **context):
     Returns a logger instance with a JSON formatter and optional context.
     """
     logger = logging.getLogger(name)
-
-    # Prevent adding handlers multiple times
     if not logger.handlers:
         logger.setLevel(settings.LOG_LEVEL)
         handler = logging.StreamHandler()
-        formatter = JsonFormatter()
-        handler.setFormatter(formatter)
+        handler.setFormatter(JsonFormatter())
         logger.addHandler(handler)
-        logger.propagate = False  # Prevent root logger from duplicating messages
-
-    # Create a new adapter to inject context into log records
-    adapter = logging.LoggerAdapter(logger, {'context': context})
-    return adapter
+        logger.propagate = False
+    return logging.LoggerAdapter(logger, {'context': context})
 
 
-# Configure the root logger to catch any unhandled logs
 logging.basicConfig(level=settings.LOG_LEVEL, format='%(levelname)s: %(message)s')
 
 # ==============================================================================
-# File: scheduler_app/utils/database.py (MODIFIED)
+# File: scheduler_app/utils/database.py
 # Description: Handles all database connection logic.
 # ==============================================================================
 from pymongo import MongoClient
@@ -160,53 +149,58 @@ class RedisCoordinator:
     def __init__(self, redis_url: str = settings.REDIS_URL):
         self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
         self.completion_channel = "workflow_completion_events"
-        self._register_scripts()
-
-    def _register_scripts(self):
-        lua_script = """
-        local completed_key = KEYS[1]
-        local total_key = KEYS[2]
-        local channel = ARGV[1]
-        local workflow_id = ARGV[2]
-        if redis.call('EXISTS', total_key) == 0 then return 0 end
-        local completed = redis.call('INCR', completed_key)
-        local total = tonumber(redis.call('GET', total_key))
-        if total > 0 and completed >= total then
-            redis.call('PUBLISH', channel, workflow_id)
-            return 1
-        end
-        return 0
-        """
-        self.finisher_script = self.redis.register_script(lua_script)
 
     def init_counter(self, workflow_id: str, total_count: int, job_id: str):
         logger.info(f"Initializing Redis counter for job '{job_id}'.", workflow_id=workflow_id, total_items=total_count)
         pipe = self.redis.pipeline()
-        pipe.set(f"counter:{workflow_id}:completed", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
+        pipe.set(f"counter:{workflow_id}:succeeded", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
+        pipe.set(f"counter:{workflow_id}:failed", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
         pipe.set(f"counter:{workflow_id}:total", total_count, ex=settings.REDIS_COUNTER_TTL_SECONDS)
         pipe.set(f"workflow_info:{workflow_id}", job_id, ex=settings.REDIS_COUNTER_TTL_SECONDS)
         pipe.execute()
 
-    def increment(self, workflow_id: str):
-        completed_key = f"counter:{workflow_id}:completed"
-        total_key = f"counter:{workflow_id}:total"
-        try:
-            result = self.finisher_script(keys=[completed_key, total_key], args=[self.completion_channel, workflow_id])
-            if result == 1:
-                logger.info("Final sub-task completed. Published completion event.", workflow_id=workflow_id)
-        except redis.exceptions.ResponseError as e:
-            logger.error(f"Lua script error for workflow.", workflow_id=workflow_id, error=str(e))
+    def _check_completion(self, workflow_id: str):
+        """Checks if all tasks for a workflow are done and publishes if so."""
+        pipe = self.redis.pipeline()
+        pipe.get(f"counter:{workflow_id}:succeeded")
+        pipe.get(f"counter:{workflow_id}:failed")
+        pipe.get(f"counter:{workflow_id}:total")
+        succeeded, failed, total = pipe.execute()
+
+        succeeded = int(succeeded or 0)
+        failed = int(failed or 0)
+        total = int(total or 0)
+
+        if total > 0 and (succeeded + failed) >= total:
+            logger.info("Final sub-task completed. Publishing completion event.", workflow_id=workflow_id)
+            self.redis.publish(self.completion_channel, workflow_id)
+
+    def increment_success(self, workflow_id: str):
+        """Atomically increments the success counter."""
+        self.redis.incr(f"counter:{workflow_id}:succeeded")
+        self._check_completion(workflow_id)
+
+    def increment_failure(self, workflow_id: str):
+        """Atomically increments the failure counter."""
+        self.redis.incr(f"counter:{workflow_id}:failed")
+        self._check_completion(workflow_id)
 
     def get_progress(self, workflow_id: str) -> dict:
+        """Gets the current progress of a fan-out job."""
         pipe = self.redis.pipeline()
-        pipe.get(f"counter:{workflow_id}:completed")
+        pipe.get(f"counter:{workflow_id}:succeeded")
+        pipe.get(f"counter:{workflow_id}:failed")
         pipe.get(f"counter:{workflow_id}:total")
-        results = pipe.execute()
-        return {"processed": int(results[0] or 0), "expected": int(results[1] or 0)}
+        succeeded, failed, total = pipe.execute()
+        return {
+            "succeeded": int(succeeded or 0),
+            "failed": int(failed or 0),
+            "total": int(total or 0),
+        }
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/definitions.py (MODIFIED)
+# File: scheduler_app/jobs/definitions.py
 # Description: Defines the jobs and their dependencies.
 # ==============================================================================
 JOB_DEFINITIONS = [
@@ -222,12 +216,13 @@ JOB_DEFINITIONS = [
         "id": "fetch_labels",
         "name": "Fetch All Labels",
         "function": "fetch_labels",
-        "triggers_on_completion_of": "start_repo_ingestion_workflow"
+        "triggers_on_completion_of": "start_repo_ingestion_workflow",
+        "is_workflow_starter": True  # This job can also be a workflow starter
     },
 ]
 
 # ==============================================================================
-# File: scheduler_app/jobs/api_caller.py (MODIFIED)
+# File: scheduler_app/jobs/api_caller.py
 # Description: Handles API requests for jobs.
 # ==============================================================================
 import requests
@@ -250,7 +245,7 @@ def trigger_api_call(url: str, method: str, trace_id: str, headers: dict = None,
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/functions.py (MODIFIED)
+# File: scheduler_app/jobs/functions.py
 # Description: The functions for the scheduler's jobs.
 # ==============================================================================
 from scheduler_app.jobs.api_caller import trigger_api_call
@@ -295,7 +290,7 @@ JOB_FUNCTIONS = {
 # File: conceptual_celery_worker.py (For Reference)
 # ==============================================================================
 # from celery import Celery
-# from celery.signals import task_success
+# from celery.signals import task_success, task_failure
 # from scheduler_app.utils.redis_coordinator import RedisCoordinator
 # from scheduler_app.utils.config import settings
 # from scheduler_app.utils.logger import get_logger
@@ -307,22 +302,24 @@ JOB_FUNCTIONS = {
 #     logger = get_logger(__name__, workflow_id=workflow_id, repo_url=repo_url)
 #     logger.info("Worker processing repo.")
 #     # ... your actual logic ...
+#     # if something fails, raise an exception
 #     return {"status": "success", "repo": repo_url}
 
 # @task_success.connect(sender=process_single_repo)
 # def on_repo_process_success(sender=None, **kwargs):
-#     task_kwargs = sender.request.kwargs
-#     workflow_id = task_kwargs.get('workflow_id')
-#     if not workflow_id:
-#         get_logger(__name__).error("Could not find workflow_id in successful task signal's kwargs.")
-#         return
-#     get_logger(__name__, workflow_id=workflow_id).info("Success signal received for task.")
-#     redis_coord = RedisCoordinator()
-#     redis_coord.increment(workflow_id=workflow_id)
+#     workflow_id = sender.request.kwargs.get('workflow_id')
+#     if not workflow_id: return
+#     RedisCoordinator().increment_success(workflow_id=workflow_id)
+
+# @task_failure.connect(sender=process_single_repo)
+# def on_repo_process_failure(sender=None, **kwargs):
+#     workflow_id = sender.request.kwargs.get('workflow_id')
+#     if not workflow_id: return
+#     RedisCoordinator().increment_failure(workflow_id=workflow_id)
 
 
 # ==============================================================================
-# File: scheduler_app/core/scheduler.py (MODIFIED)
+# File: scheduler_app/core/scheduler.py
 # Description: The core logic for the scheduler application.
 # ==============================================================================
 import uuid
@@ -340,7 +337,6 @@ from scheduler_app.utils.logger import get_logger
 
 def task_wrapper(job_id: str, *args):
     """A robust wrapper that manages the full lifecycle of a job run."""
-    # Each job run, including dependent ones, gets its own unique trace_id.
     trace_id = str(uuid.uuid4())
     logger = get_logger(__name__, job_id=job_id, trace_id=trace_id)
 
@@ -422,7 +418,7 @@ class SchedulerManager:
 
 
 # ==============================================================================
-# File: scheduler_app/api/client.py (MODIFIED - Renamed from scheduler_client.py)
+# File: scheduler_app/api/client.py (MODIFIED)
 # Description: A client to interact with the MongoDB job store for READ-ONLY operations.
 # ==============================================================================
 import pendulum
@@ -466,13 +462,14 @@ class SchedulerClient:
                 "last_status": last_status,
                 "ui_status": ui_status,
                 "last_workflow_id": last_run.get("trace_id"),
-                "is_workflow_starter": job_defs.get(job.id, {}).get("is_workflow_starter", False)
+                "is_workflow_starter": job_defs.get(job.id, {}).get("is_workflow_starter", False),
+                "last_progress": last_run.get("progress", {})
             })
         return job_list
 
 
 # ==============================================================================
-# File: scheduler_app/api/server.py (MODIFIED - Renamed from api_server.py)
+# File: scheduler_app/api/server.py
 # Description: The public-facing FastAPI server for the combined pod.
 # ==============================================================================
 import uuid
@@ -560,6 +557,7 @@ from scheduler_app.utils.config import settings
 from scheduler_app.utils.redis_coordinator import RedisCoordinator
 from scheduler_app.jobs.definitions import JOB_DEFINITIONS
 from scheduler_app.utils.logger import get_logger
+from scheduler_app.utils.database import get_mongo_client
 
 logger = get_logger(__name__)
 scheduler_manager = SchedulerManager()
@@ -570,10 +568,24 @@ def pubsub_listener_loop():
     pubsub = redis_client.pubsub()
     pubsub.subscribe(RedisCoordinator().completion_channel)
     logger.info("Pub/Sub listener started.", channel=RedisCoordinator().completion_channel)
+
     for message in pubsub.listen():
         if message["type"] == "message":
             completed_workflow_id = message["data"]
             logger.info("Received completion event.", workflow_id=completed_workflow_id)
+
+            # --- Persist Final Progress to MongoDB ---
+            redis_coord = RedisCoordinator()
+            progress_data = redis_coord.get_progress(completed_workflow_id)
+
+            mongo_client = get_mongo_client()
+            status_collection = mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
+            status_collection.update_one(
+                {"history.trace_id": completed_workflow_id},
+                {"$set": {"history.$.progress": progress_data}}
+            )
+            mongo_client.close()
+            # --- End Persistence Logic ---
 
             workflow_info_key = f"workflow_info:{completed_workflow_id}"
             completed_job_id = redis_client.get(workflow_info_key)
@@ -589,7 +601,6 @@ def pubsub_listener_loop():
                                 completed_job_id=completed_job_id)
                     try:
                         run_id = f"{next_job_id}_for_{completed_workflow_id}"
-                        # IMPORTANT: We do NOT pass the old trace_id. The wrapper will generate a new one.
                         scheduler_manager.scheduler.add_job(
                             'scheduler_app.core.scheduler:task_wrapper', trigger='date', args=[next_job_id],
                             id=run_id, name=f"{job_def['name']} (after {completed_job_id})", replace_existing=False
@@ -631,7 +642,7 @@ if __name__ == "__main__":
 
 
 # ==============================================================================
-# File: tests/test_redis_coordinator.py (NEW)
+# File: tests/test_redis_coordinator.py
 # Description: Unit tests for the RedisCoordinator class.
 # ==============================================================================
 import unittest
@@ -652,47 +663,33 @@ class TestRedisCoordinator(unittest.TestCase):
         mock_pipeline = self.mock_redis.pipeline.return_value
         self.coordinator.init_counter(workflow_id="test-123", total_count=100, job_id="job-abc")
 
-        # Check that pipeline was used
         self.mock_redis.pipeline.assert_called_once()
-
-        # Check that the correct set calls were made on the pipeline
-        mock_pipeline.set.assert_any_call("counter:test-123:completed", 0, ex=86400)
+        mock_pipeline.set.assert_any_call("counter:test-123:succeeded", 0, ex=86400)
+        mock_pipeline.set.assert_any_call("counter:test-123:failed", 0, ex=86400)
         mock_pipeline.set.assert_any_call("counter:test-123:total", 100, ex=86400)
         mock_pipeline.set.assert_any_call("workflow_info:test-123", "job-abc", ex=86400)
         mock_pipeline.execute.assert_called_once()
 
-    def test_increment_in_progress(self):
-        """Test that increment does not publish when not complete."""
-        # Mock the Lua script to return 0 (in-progress)
-        self.coordinator.finisher_script = MagicMock(return_value=0)
+    @patch('scheduler_app.utils.redis_coordinator.RedisCoordinator._check_completion')
+    def test_increment_success(self, mock_check):
+        """Test that increment_success calls INCR and checks for completion."""
+        self.coordinator.increment_success(workflow_id="test-456")
+        self.mock_redis.incr.assert_called_once_with("counter:test-456:succeeded")
+        mock_check.assert_called_once_with("test-456")
 
-        self.coordinator.increment(workflow_id="test-456")
-
-        # Assert the script was called correctly
-        self.coordinator.finisher_script.assert_called_once_with(
-            keys=['counter:test-456:completed', 'counter:test-456:total'],
-            args=['workflow_completion_events', 'test-456']
-        )
-
-    def test_increment_on_completion(self):
-        """Test that increment publishes on completion."""
-        # Mock the Lua script to return 1 (completed)
-        self.coordinator.finisher_script = MagicMock(return_value=1)
-
-        self.coordinator.increment(workflow_id="test-789")
-
-        # Assert the script was called correctly
-        self.coordinator.finisher_script.assert_called_once_with(
-            keys=['counter:test-789:completed', 'counter:test-789:total'],
-            args=['workflow_completion_events', 'test-789']
-        )
+    @patch('scheduler_app.utils.redis_coordinator.RedisCoordinator._check_completion')
+    def test_increment_failure(self, mock_check):
+        """Test that increment_failure calls INCR and checks for completion."""
+        self.coordinator.increment_failure(workflow_id="test-789")
+        self.mock_redis.incr.assert_called_once_with("counter:test-789:failed")
+        mock_check.assert_called_once_with("test-789")
 
 
 if __name__ == '__main__':
     unittest.main()
 
 # ==============================================================================
-# File: tests/test_api.py (NEW)
+# File: tests/test_api.py
 # Description: Unit tests for the FastAPI server endpoints.
 # ==============================================================================
 import unittest
@@ -724,7 +721,7 @@ class TestApi(unittest.TestCase):
     @patch('scheduler_app.api.server.redis_coord')  # Mock the RedisCoordinator
     def test_get_progress_success(self, mock_redis_coord):
         """Test the /api/progress/{workflow_id} endpoint."""
-        mock_progress = {"processed": 50, "expected": 100}
+        mock_progress = {"succeeded": 50, "failed": 5, "total": 100}
         mock_redis_coord.get_progress.return_value = mock_progress
 
         response = self.client.get("/api/progress/wf-123")
