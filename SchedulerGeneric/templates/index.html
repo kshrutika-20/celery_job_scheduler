@@ -67,7 +67,7 @@
                                     </span>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                    {% if job.id == 'start_repo_ingestion_workflow' and job.last_workflow_id %}
+                                    {% if job.is_workflow_starter and job.last_workflow_id %}
                                     <button onclick="showProgress('{{ job.last_workflow_id }}')" class="text-indigo-600 hover:text-indigo-900 mr-3" title="View Progress"><i class="fas fa-tasks fa-lg"></i></button>
                                     {% endif %}
                                     <button onclick="manageJob('{{ job.id }}', 'trigger')" class="text-blue-600 hover:text-blue-900 mr-3" title="Trigger Now"><i class="fas fa-bolt fa-lg"></i></button>
@@ -99,7 +99,7 @@
                 <div class="mt-2 px-7 py-3">
                     <p class="text-sm text-gray-500" id="progress-text">Loading...</p>
                     <div class="w-full bg-gray-200 rounded-full h-4 mt-4">
-                        <div id="progress-bar" class="bg-blue-600 h-4 rounded-full" style="width: 0%"></div>
+                        <div id="progress-bar" class="bg-blue-600 h-4 rounded-full transition-all duration-500" style="width: 0%"></div>
                     </div>
                 </div>
                 <div class="items-center px-4 py-3">
@@ -139,6 +139,11 @@
                     if (processed >= expected && expected > 0) {
                         clearInterval(progressInterval);
                         progressText.innerText = `Completed: ${processed} / ${expected} tasks!`;
+                        progressBar.classList.remove('bg-blue-600');
+                        progressBar.classList.add('bg-green-600');
+                    } else {
+                        progressBar.classList.remove('bg-green-600');
+                        progressBar.classList.add('bg-blue-600');
                     }
                 } catch (error) {
                     console.error('Progress fetch error:', error);
@@ -147,7 +152,6 @@
                 }
             };
 
-            // Initial call and then set interval
             updateProgress();
             progressInterval = setInterval(updateProgress, 3000); // Poll every 3 seconds
 
@@ -171,12 +175,7 @@
                 const result = await response.json();
                 if (response.ok) {
                     alert(result.message || `Job '${jobId}' ${result.status}.`);
-                    if (action !== 'trigger') {
-                        location.reload();
-                    } else {
-                        // For trigger, wait a moment then reload to see the status change
-                        setTimeout(() => location.reload(), 1500);
-                    }
+                    setTimeout(() => location.reload(), 500);
                 } else {
                     alert(`Error: ${result.detail}`);
                 }
