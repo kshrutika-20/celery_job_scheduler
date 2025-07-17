@@ -10,15 +10,14 @@
         body { font-family: 'Inter', sans-serif; }
         @import url('https://rsms.me/inter/inter.css');
         .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
-        .status-scheduled { background-color: #3498db; } /* Blue */
+        .status-scheduled, .status-dependent { background-color: #3498db; } /* Blue */
         .status-paused { background-color: #f1c40f; } /* Yellow */
         .status-failing { background-color: #e74c3c; } /* Red */
         .status-running { background-color: #9b59b6; } /* Purple */
         .fa-spin { animation: fa-spin 2s infinite linear; }
         @keyframes fa-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .modal { transition: opacity 0.25s ease; }
-        .progress-bar-container { width: 120px; height: 10px; background-color: #e0e0e0; border-radius: 5px; overflow: hidden; }
-        .progress-bar { height: 100%; transition: width 0.3s ease-in-out; }
+        .progress-bar-container { width: 120px; height: 12px; background-color: #e0e0e0; border-radius: 6px; overflow: hidden; border: 1px solid #ccc; }
+        .progress-bar { height: 100%; transition: width 0.3s ease-in-out; text-align: center; color: white; font-size: 9px; line-height: 12px;}
     </style>
 </head>
 <body class="bg-gray-50 text-gray-800">
@@ -73,7 +72,7 @@
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     {% if job.is_workflow_starter and job.last_workflow_id %}
-                                    <div class="flex items-center">
+                                    <div class="flex items-center" id="progress-container-{{ job.last_workflow_id }}">
                                         {% set progress = job.last_progress %}
                                         {% set succeeded = progress.succeeded | default(0) %}
                                         {% set failed = progress.failed | default(0) %}
@@ -82,9 +81,7 @@
                                         <div class="progress-bar-container" title="{{succeeded}} Succeeded, {{failed}} Failed, {{total}} Total">
                                             <div class="progress-bar {{ 'bg-red-500' if failed > 0 else 'bg-green-500' }}" style="width: {{ percentage }}%"></div>
                                         </div>
-                                        {% if job.ui_status == 'Running' %}
-                                            <button onclick="showProgress('{{ job.last_workflow_id }}')" class="ml-2 text-indigo-600 hover:text-indigo-900" title="View Live Progress"><i class="fas fa-search-plus"></i></button>
-                                        {% endif %}
+                                        <span class="text-xs ml-2 text-gray-600">{{succeeded + failed}}/{{total}}</span>
                                     </div>
                                     {% else %}
                                     <span class="text-xs text-gray-400">N/A</span>
@@ -112,74 +109,55 @@
         </div>
     </div>
 
-    <!-- Progress Modal -->
-    <div id="progress-modal" class="modal fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden">
-        <div class="relative top-20 mx-auto p-5 border w-full max-w-md shadow-lg rounded-md bg-white">
-            <div class="mt-3 text-center">
-                <h3 class="text-lg leading-6 font-medium text-gray-900">Live Workflow Progress</h3>
-                <div class="mt-2 px-7 py-3">
-                    <p class="text-sm text-gray-500" id="progress-text">Loading...</p>
-                    <div class="w-full bg-gray-200 rounded-full h-4 mt-4">
-                        <div id="progress-bar" class="bg-blue-600 h-4 rounded-full transition-all duration-500" style="width: 0%"></div>
-                    </div>
-                </div>
-                <div class="items-center px-4 py-3">
-                    <button id="close-modal" class="px-4 py-2 bg-gray-500 text-white text-base font-medium rounded-md w-full shadow-sm hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-300">
-                        Close
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script>
-        let progressInterval;
+        const activeWorkflows = new Map();
 
-        async function showProgress(workflowId) {
-            const modal = document.getElementById('progress-modal');
-            const progressText = document.getElementById('progress-text');
-            const progressBar = document.getElementById('progress-bar');
+        function updateLiveProgress(workflowId) {
+            const container = document.getElementById(`progress-container-${workflowId}`);
+            if (!container) return;
 
-            modal.classList.remove('hidden');
+            const progressBar = container.querySelector('.progress-bar');
+            const progressText = container.querySelector('span');
 
-            const updateProgress = async () => {
-                try {
-                    const response = await fetch(`/api/progress/${workflowId}`);
-                    if (!response.ok) throw new Error('Failed to fetch progress');
-                    const data = await response.json();
-
+            fetch(`/api/progress/${workflowId}`)
+                .then(response => response.json())
+                .then(data => {
                     const succeeded = data.succeeded || 0;
                     const failed = data.failed || 0;
                     const total = data.total || 0;
                     const processed = succeeded + failed;
                     const percentage = total > 0 ? (processed / total) * 100 : 0;
 
-                    progressText.innerText = `Processing: ${processed} / ${total} (Succeeded: ${succeeded}, Failed: ${failed})`;
                     progressBar.style.width = `${percentage}%`;
+                    progressBar.classList.remove('bg-green-500', 'bg-red-500');
+                    progressBar.classList.add('bg-blue-600');
+                    progressText.innerText = `${processed}/${total}`;
 
                     if (processed >= total && total > 0) {
-                        clearInterval(progressInterval);
-                        progressBar.classList.remove('bg-blue-600');
-                        progressBar.classList.add(failed > 0 ? 'bg-red-600' : 'bg-green-600');
-                    } else {
-                        progressBar.classList.remove('bg-green-600', 'bg-red-600');
-                        progressBar.classList.add('bg-blue-600');
+                        clearInterval(activeWorkflows.get(workflowId));
+                        activeWorkflows.delete(workflowId);
+                        // Final state will be shown on next page reload from MongoDB data
+                        setTimeout(() => location.reload(), 1000);
                     }
-                } catch (error) {
+                })
+                .catch(error => {
                     console.error('Progress fetch error:', error);
-                    progressText.innerText = 'Could not load progress.';
-                    clearInterval(progressInterval);
-                }
-            };
-
-            updateProgress();
-            progressInterval = setInterval(updateProgress, 3000);
-
-            document.getElementById('close-modal').onclick = () => {
-                modal.classList.add('hidden');
-                clearInterval(progressInterval);
-            };
+                    clearInterval(activeWorkflows.get(workflowId));
+                    activeWorkflows.delete(workflowId);
+                });
         }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const runningJobs = document.querySelectorAll('i.fa-spin');
+            runningJobs.forEach(icon => {
+                const row = icon.closest('tr');
+                const workflowId = row.querySelector('[id^="progress-container-"]')?.id.split('-').pop();
+                if (workflowId && !activeWorkflows.has(workflowId)) {
+                    const intervalId = setInterval(() => updateLiveProgress(workflowId), 3000);
+                    activeWorkflows.set(workflowId, intervalId);
+                }
+            });
+        });
 
         async function manageJob(jobId, action) {
             let url = `/api/jobs/${jobId}`;
