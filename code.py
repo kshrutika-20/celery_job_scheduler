@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     PRODUCER_API_URL: str = "http://localhost:8001"
 
     LOG_LEVEL: str = "INFO"
+    TIMEZONE: str = "Asia/Kolkata"
 
     class Config:
         env_file = ".env"
@@ -88,10 +89,14 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "name": record.name,
         }
+        # Add extra context if it exists
         if hasattr(record, 'context'):
             log_record.update(record.context)
+
+        # Add exception info if it exists
         if record.exc_info:
             log_record['exception'] = self.formatException(record.exc_info)
+
         return json.dumps(log_record)
 
 
@@ -100,15 +105,22 @@ def get_logger(name: str, **context):
     Returns a logger instance with a JSON formatter and optional context.
     """
     logger = logging.getLogger(name)
+
+    # Prevent adding handlers multiple times
     if not logger.handlers:
         logger.setLevel(settings.LOG_LEVEL)
         handler = logging.StreamHandler()
-        handler.setFormatter(JsonFormatter())
+        formatter = JsonFormatter()
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
-        logger.propagate = False
-    return logging.LoggerAdapter(logger, {'context': context})
+        logger.propagate = False  # Prevent root logger from duplicating messages
+
+    # Create a new adapter to inject context into log records
+    adapter = logging.LoggerAdapter(logger, {'context': context})
+    return adapter
 
 
+# Configure the root logger to catch any unhandled logs
 logging.basicConfig(level=settings.LOG_LEVEL, format='%(levelname)s: %(message)s')
 
 # ==============================================================================
@@ -131,7 +143,7 @@ def get_mongo_client() -> MongoClient:
 
 
 # ==============================================================================
-# File: scheduler_app/utils/redis_coordinator.py (MODIFIED)
+# File: scheduler_app/utils/redis_coordinator.py
 # Description: Manages distributed counters and pub/sub events for task coordination.
 # ==============================================================================
 import redis
@@ -154,9 +166,6 @@ class RedisCoordinator:
 
     def _register_scripts(self):
         """Registers Lua scripts for atomic operations."""
-        # This script atomically increments a counter (succeeded or failed) and
-        # checks if the total processed count has reached the expected total.
-        # If it has, it publishes a completion message.
         lua_script = """
         local key_to_incr = KEYS[1]
         local succeeded_key = KEYS[2]
@@ -165,7 +174,6 @@ class RedisCoordinator:
         local channel = ARGV[1]
         local workflow_id = ARGV[2]
 
-        -- Ensure the workflow hasn't already been completed/cleaned up
         if redis.call('EXISTS', total_key) == 0 then
             return 0
         end
@@ -177,12 +185,11 @@ class RedisCoordinator:
         local total = tonumber(redis.call('GET', total_key))
 
         if total > 0 and (succeeded + failed) >= total then
-            -- Publish only on the first time completion is detected
             if redis.call('PUBLISH', channel, workflow_id) > 0 then
-                return 1 -- Signal completion was just published
+                return 1
             end
         end
-        return 0 -- Signal in-progress
+        return 0
         """
         self.finisher_script = self.redis.register_script(lua_script)
 
@@ -210,18 +217,15 @@ class RedisCoordinator:
             if result == 1:
                 logger.info("Final sub-task completed. Published completion event.", workflow_id=workflow_id)
         except redis.exceptions.ResponseError as e:
-            logger.error(f"Lua script error for workflow.", workflow_id=workflow_id, error=str(e))
+            logger.error("Lua script error for workflow.", workflow_id=workflow_id, error=str(e))
 
     def increment_success(self, workflow_id: str):
-        """Atomically increments the success counter."""
         self._increment(workflow_id, "succeeded")
 
     def increment_failure(self, workflow_id: str):
-        """Atomically increments the failure counter."""
         self._increment(workflow_id, "failed")
 
     def get_progress(self, workflow_id: str) -> dict:
-        """Gets the current progress of a fan-out job."""
         pipe = self.redis.pipeline()
         pipe.get(f"counter:{workflow_id}:succeeded")
         pipe.get(f"counter:{workflow_id}:failed")
@@ -235,24 +239,46 @@ class RedisCoordinator:
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/definitions.py
+# File: scheduler_app/jobs/definitions.py (MODIFIED)
 # Description: Defines the jobs and their dependencies.
 # ==============================================================================
 JOB_DEFINITIONS = [
     {
-        "id": "start_repo_ingestion_workflow",
-        "name": "Start Repo Ingestion Workflow",
+        "id": "fetch_projects",
+        "name": "Fetch All Projects",
         "trigger": "cron",
-        "trigger_args": {"hour": 1},
-        "function": "start_repo_ingestion_workflow",
+        "trigger_args": {"hour": 6, "timezone": "Asia/Kolkata"},
+        "function": "fetch_projects",
+        "is_workflow_starter": True
+    },
+    {
+        "id": "fetch_project_permissions",
+        "name": "Fetch Project Permissions",
+        "function": "fetch_project_permissions",
+        "triggers_on_completion_of": "fetch_projects",
+        "is_workflow_starter": True
+    },
+    {
+        "id": "fetch_repo",
+        "name": "Fetch All Repositories",
+        "function": "fetch_repo",
+        "triggers_on_completion_of": "fetch_projects",
         "is_workflow_starter": True
     },
     {
         "id": "fetch_labels",
         "name": "Fetch All Labels",
         "function": "fetch_labels",
-        "triggers_on_completion_of": "start_repo_ingestion_workflow",
-        "is_workflow_starter": True  # This job can also be a workflow starter
+        "triggers_on_completion_of": "fetch_repo",
+        "is_workflow_starter": True
+    },
+    {
+        "id": "fetch_repo_permissions",
+        "name": "Fetch Repository Permissions",
+        "function": "fetch_repo_permissions",
+        "triggers_on_completion_of": "fetch_labels",
+        "delay_after_trigger_minutes": 30,
+        "is_workflow_starter": True
     },
 ]
 
@@ -272,15 +298,15 @@ def trigger_api_call(url: str, method: str, trace_id: str, headers: dict = None,
     try:
         response = requests.request(method=method.upper(), url=url, headers=request_headers, json=json_data, timeout=30)
         response.raise_for_status()
-        logger.info(f"API call successful.", url=url, status_code=response.status_code)
+        logger.info("API call successful.", url=url, status_code=response.status_code)
         return True
     except requests.exceptions.RequestException as e:
-        logger.error(f"API call failed.", url=url, error=str(e))
+        logger.error("API call failed.", url=url, error=str(e))
         return False
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/functions.py
+# File: scheduler_app/jobs/functions.py (MODIFIED)
 # Description: The functions for the scheduler's jobs.
 # ==============================================================================
 from scheduler_app.jobs.api_caller import trigger_api_call
@@ -288,37 +314,43 @@ from scheduler_app.utils.config import settings
 from scheduler_app.utils.logger import get_logger
 
 
-def fetch_all_repos_from_mongo(workflow_id: str):
-    logger = get_logger(__name__, workflow_id=workflow_id)
-    logger.info("Gathering all repo data from MongoDB to start label fetching.")
-    return []
-
-
-def start_repo_ingestion_workflow(trace_id: str, job_id: str):
+def generic_producer_call(trace_id: str, job_id: str, producer_endpoint: str):
+    """A generic function to call a producer endpoint."""
     logger = get_logger(__name__, trace_id=trace_id, job_id=job_id)
-    logger.info("Calling Producer to start repo ingestion workflow.")
-    producer_url = f"{settings.PRODUCER_API_URL}/produce/fetch-repos"
+    logger.info(f"Calling Producer at '{producer_endpoint}'.")
+    producer_url = f"{settings.PRODUCER_API_URL}/{producer_endpoint}"
     return trigger_api_call(
         url=producer_url, method="POST", trace_id=trace_id,
         json_data={"workflow_id": trace_id, "job_id": job_id}
     )
 
 
+def fetch_projects(trace_id: str, job_id: str):
+    return generic_producer_call(trace_id, job_id, "produce/fetch-projects")
+
+
+def fetch_project_permissions(trace_id: str, job_id: str):
+    return generic_producer_call(trace_id, job_id, "produce/fetch-project-permissions")
+
+
+def fetch_repo(trace_id: str, job_id: str):
+    return generic_producer_call(trace_id, job_id, "produce/fetch-repos")
+
+
 def fetch_labels(trace_id: str, job_id: str):
-    logger = get_logger(__name__, trace_id=trace_id, job_id=job_id)
-    logger.info("All repos processed. Now starting fetch_labels workflow.")
-    repos_data = fetch_all_repos_from_mongo(workflow_id=trace_id)
-    producer_url = f"{settings.PRODUCER_API_URL}/produce/fetch-labels"
-    logger.info(f"Calling producer to start label ingestion for {len(repos_data)} repos.")
-    return trigger_api_call(
-        url=producer_url, method="POST", trace_id=trace_id,
-        json_data={"repos": repos_data, "workflow_id": trace_id, "job_id": job_id}
-    )
+    return generic_producer_call(trace_id, job_id, "produce/fetch-labels")
+
+
+def fetch_repo_permissions(trace_id: str, job_id: str):
+    return generic_producer_call(trace_id, job_id, "produce/fetch-repo-permissions")
 
 
 JOB_FUNCTIONS = {
-    'start_repo_ingestion_workflow': start_repo_ingestion_workflow,
+    'fetch_projects': fetch_projects,
+    'fetch_project_permissions': fetch_project_permissions,
+    'fetch_repo': fetch_repo,
     'fetch_labels': fetch_labels,
+    'fetch_repo_permissions': fetch_repo_permissions,
 }
 
 # ==============================================================================
@@ -333,28 +365,27 @@ JOB_FUNCTIONS = {
 # celery_app = Celery('tasks', broker=settings.REDIS_URL)
 
 # @celery_app.task(bind=True)
-# def process_single_repo(self, repo_url: str, workflow_id: str):
-#     logger = get_logger(__name__, workflow_id=workflow_id, repo_url=repo_url)
-#     logger.info("Worker processing repo.")
+# def process_single_item(self, item_url: str, workflow_id: str):
+#     logger = get_logger(__name__, workflow_id=workflow_id, item_url=item_url)
+#     logger.info("Worker processing item.")
 #     # ... your actual logic ...
-#     # if something fails, raise an exception
-#     return {"status": "success", "repo": repo_url}
+#     return {"status": "success", "item": item_url}
 
-# @task_success.connect(sender=process_single_repo)
-# def on_repo_process_success(sender=None, **kwargs):
+# @task_success.connect(sender=process_single_item)
+# def on_item_process_success(sender=None, **kwargs):
 #     workflow_id = sender.request.kwargs.get('workflow_id')
 #     if not workflow_id: return
 #     RedisCoordinator().increment_success(workflow_id=workflow_id)
 
-# @task_failure.connect(sender=process_single_repo)
-# def on_repo_process_failure(sender=None, **kwargs):
+# @task_failure.connect(sender=process_single_item)
+# def on_item_process_failure(sender=None, **kwargs):
 #     workflow_id = sender.request.kwargs.get('workflow_id')
 #     if not workflow_id: return
 #     RedisCoordinator().increment_failure(workflow_id=workflow_id)
 
 
 # ==============================================================================
-# File: scheduler_app/core/scheduler.py
+# File: scheduler_app/core/scheduler.py (MODIFIED)
 # Description: The core logic for the scheduler application.
 # ==============================================================================
 import uuid
@@ -370,10 +401,10 @@ from scheduler_app.utils.config import settings
 from scheduler_app.utils.logger import get_logger
 
 
-def task_wrapper(job_id: str, *args):
+def task_wrapper(job_id: str, parent_trace_id: str | None = None):
     """A robust wrapper that manages the full lifecycle of a job run."""
     trace_id = str(uuid.uuid4())
-    logger = get_logger(__name__, job_id=job_id, trace_id=trace_id)
+    logger = get_logger(__name__, job_id=job_id, trace_id=trace_id, parent_trace_id=parent_trace_id)
 
     mongo_client = None
     try:
@@ -381,7 +412,7 @@ def task_wrapper(job_id: str, *args):
         status_collection = mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
         logger.info("Task wrapper executing.")
         run_record = {"trace_id": trace_id, "status": "Running",
-                      "timestamp_utc": datetime.now(timezone.utc).isoformat()}
+                      "timestamp_utc": datetime.now(timezone.utc).isoformat(), "parent_trace_id": parent_trace_id}
         status_collection.update_one({"job_id": job_id}, {"$push": {"history": {"$each": [run_record], "$slice": -50}},
                                                           "$set": {"job_id": job_id}}, upsert=True)
 
@@ -423,16 +454,16 @@ class SchedulerManager:
         executors = {'default': ThreadPoolExecutor(20), 'processpool': ProcessPoolExecutor(5)}
         job_defaults = {'coalesce': False, 'max_instances': 1}
         scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults,
-                                        timezone='UTC')
+                                        timezone=settings.TIMEZONE)
         scheduler.add_listener(self.job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
         return scheduler
 
     def job_event_listener(self, event):
         logger = get_logger(__name__, job_id=event.job_id)
         if event.exception:
-            logger.error(f"APScheduler-level error.", error=str(event.exception))
+            logger.error("APScheduler-level error.", error=str(event.exception))
         else:
-            logger.info(f"APScheduler successfully triggered job.")
+            logger.info("APScheduler successfully triggered job.")
 
     def schedule_all_jobs(self):
         for job_id, job_def in self.job_definitions.items():
@@ -443,7 +474,7 @@ class SchedulerManager:
                               'max_instances': job_def.get('max_instances', 1), 'replace_existing': True,
                               **job_def.get('trigger_args', {})}
                 self.scheduler.add_job(**job_kwargs)
-                self.logger.info(f"Scheduled job.", job_id=job_id)
+                self.logger.info("Scheduled job.", job_id=job_id)
 
     def start(self):
         self.scheduler.start()
@@ -453,7 +484,7 @@ class SchedulerManager:
 
 
 # ==============================================================================
-# File: scheduler_app/api/client.py (MODIFIED)
+# File: scheduler_app/api/client.py
 # Description: A client to interact with the MongoDB job store for READ-ONLY operations.
 # ==============================================================================
 import pendulum
@@ -477,8 +508,15 @@ class SchedulerClient:
         job_list = []
         for job in jobs:
             status_info = statuses.get(job.id, {})
-            last_run = status_info.get("history", [{}])[-1]
+            history = status_info.get("history", [])
+            last_run = history[-1] if history else {}
             last_status = last_run.get("status", "Unknown")
+
+            last_completed_progress = {}
+            for run in reversed(history):
+                if "progress" in run:
+                    last_completed_progress = run["progress"]
+                    break
 
             if job.next_run_time is None:
                 ui_status = "Paused"
@@ -492,13 +530,16 @@ class SchedulerClient:
             job_list.append({
                 "id": job.id, "name": job.name,
                 "next_run_time_utc": job.next_run_time.isoformat() if job.next_run_time else "N/A",
-                "next_run_time_human": pendulum.instance(
-                    job.next_run_time).diff_for_humans() if job.next_run_time else "Paused",
+                "next_run_time_human": pendulum.instance(job.next_run_time).in_timezone(
+                    settings.TIMEZONE).diff_for_humans() if job.next_run_time else "Paused",
+                "next_run_time_local": pendulum.instance(job.next_run_time).in_timezone(
+                    settings.TIMEZONE).to_datetime_string() if job.next_run_time else "N/A",
                 "last_status": last_status,
                 "ui_status": ui_status,
                 "last_workflow_id": last_run.get("trace_id"),
                 "is_workflow_starter": job_defs.get(job.id, {}).get("is_workflow_starter", False),
-                "last_progress": last_run.get("progress", {})
+                "last_progress": last_completed_progress,
+                "trigger": str(job.trigger)
             })
         return job_list
 
@@ -586,6 +627,7 @@ import uvicorn
 import threading
 import redis
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from scheduler_app.core.scheduler import SchedulerManager
 from scheduler_app.api.server import app as fastapi_app
 from scheduler_app.utils.config import settings
@@ -636,9 +678,15 @@ def pubsub_listener_loop():
                                 completed_job_id=completed_job_id)
                     try:
                         run_id = f"{next_job_id}_for_{completed_workflow_id}"
+
+                        delay_minutes = job_def.get("delay_after_trigger_minutes", 0)
+                        run_time = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+
                         scheduler_manager.scheduler.add_job(
-                            'scheduler_app.core.scheduler:task_wrapper', trigger='date', args=[next_job_id],
-                            id=run_id, name=f"{job_def['name']} (after {completed_job_id})", replace_existing=False
+                            'scheduler_app.core.scheduler:task_wrapper', trigger='date', run_date=run_time,
+                            args=[next_job_id],
+                            id=run_id, name=f"{job_def['name']} (after {completed_job_id})",
+                            replace_existing=False
                         )
                     except Exception as e:
                         logger.error(f"Error while triggering dependent job.", next_job_id=next_job_id, error=str(e))
@@ -692,6 +740,8 @@ class TestRedisCoordinator(unittest.TestCase):
         self.mock_redis = MagicMock()
         mock_redis_from_url.return_value = self.mock_redis
         self.coordinator = RedisCoordinator()
+        # Mock the registered Lua script
+        self.coordinator.finisher_script = MagicMock()
 
     def test_init_counter(self):
         """Test that init_counter sets the correct keys in Redis."""
@@ -705,19 +755,31 @@ class TestRedisCoordinator(unittest.TestCase):
         mock_pipeline.set.assert_any_call("workflow_info:test-123", "job-abc", ex=86400)
         mock_pipeline.execute.assert_called_once()
 
-    @patch('scheduler_app.utils.redis_coordinator.RedisCoordinator._check_completion')
-    def test_increment_success(self, mock_check):
-        """Test that increment_success calls INCR and checks for completion."""
+    def test_increment_success(self):
+        """Test that increment_success calls the Lua script correctly."""
         self.coordinator.increment_success(workflow_id="test-456")
-        self.mock_redis.incr.assert_called_once_with("counter:test-456:succeeded")
-        mock_check.assert_called_once_with("test-456")
+        self.coordinator.finisher_script.assert_called_once_with(
+            keys=[
+                'counter:test-456:succeeded',
+                'counter:test-456:succeeded',
+                'counter:test-456:failed',
+                'counter:test-456:total'
+            ],
+            args=['workflow_completion_events', 'test-456']
+        )
 
-    @patch('scheduler_app.utils.redis_coordinator.RedisCoordinator._check_completion')
-    def test_increment_failure(self, mock_check):
-        """Test that increment_failure calls INCR and checks for completion."""
+    def test_increment_failure(self):
+        """Test that increment_failure calls the Lua script correctly."""
         self.coordinator.increment_failure(workflow_id="test-789")
-        self.mock_redis.incr.assert_called_once_with("counter:test-789:failed")
-        mock_check.assert_called_once_with("test-789")
+        self.coordinator.finisher_script.assert_called_once_with(
+            keys=[
+                'counter:test-789:failed',
+                'counter:test-789:succeeded',
+                'counter:test-789:failed',
+                'counter:test-789:total'
+            ],
+            args=['workflow_completion_events', 'test-789']
+        )
 
 
 if __name__ == '__main__':
