@@ -11,6 +11,8 @@
 # pendulum
 # python-dotenv
 # requests
+# pytest
+# pytest-mock
 
 
 # ==============================================================================
@@ -173,7 +175,7 @@ class RedisCoordinator:
 
     def init_counter(self, workflow_id: str, total_count: int, job_id: str):
         logger = get_logger(__name__, workflow_id=workflow_id, job_id=job_id)
-        logger.info(f"Initializing Redis counter.", total_items=total_count)
+        logger.info("Initializing Redis counter.", total_items=total_count)
         pipe = self.redis.pipeline()
         pipe.set(f"counter:{workflow_id}:succeeded", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
         pipe.set(f"counter:{workflow_id}:failed", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
@@ -214,7 +216,7 @@ class RedisCoordinator:
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/definitions.py (MODIFIED)
+# File: scheduler_app/jobs/definitions.py
 # Description: Defines the jobs and their dependencies.
 # ==============================================================================
 JOB_DEFINITIONS = [
@@ -230,14 +232,14 @@ JOB_DEFINITIONS = [
         "id": "fetch_project_permissions",
         "name": "Fetch Project Permissions",
         "function": "fetch_project_permissions",
-        "triggers_on_completion_of": ["fetch_projects"],  # Can now be a list
+        "triggers_on_completion_of": ["fetch_projects"],
         "is_workflow_starter": True
     },
     {
         "id": "fetch_repo",
         "name": "Fetch All Repositories",
         "function": "fetch_repo",
-        "triggers_on_completion_of": ["fetch_projects"],  # Can now be a list
+        "triggers_on_completion_of": ["fetch_projects"],
         "is_workflow_starter": True
     },
     {
@@ -459,7 +461,7 @@ class SchedulerManager:
 
 
 # ==============================================================================
-# File: scheduler_app/api/client.py (MODIFIED)
+# File: scheduler_app/api/client.py
 # Description: A client to interact with the MongoDB job store for READ-ONLY operations.
 # ==============================================================================
 import pendulum
@@ -602,7 +604,7 @@ async def delete_job_endpoint(request: Request, job_id: str):
 
 
 # ==============================================================================
-# File: main.py (MODIFIED)
+# File: main.py
 # Description: The single entry point for the combined pod.
 # ==============================================================================
 import uvicorn
@@ -657,8 +659,7 @@ def pubsub_listener_loop():
                 # A job can be triggered by the completion of ANY of its listed dependencies
                 if completed_job_id in job_def.get("triggers_on_completion_of", []):
                     next_job_id = job_def["id"]
-                    logger.info(f"Triggering dependent job.", next_job_id=next_job_id,
-                                completed_job_id=completed_job_id)
+                    logger.info("Triggering dependent job.", next_job_id=next_job_id, completed_job_id=completed_job_id)
                     try:
                         run_id = f"{next_job_id}_for_{completed_workflow_id}"
 
@@ -694,6 +695,7 @@ fastapi_app.router.lifespan_context = lifespan
 if __name__ == "__main__":
     logger.info("Starting combined Scheduler and API server...")
     uvicorn.run("scheduler_app.main:fastapi_app", host="0.0.0.0", port=8000, reload=True)
+
 
 # ==============================================================================
 # Directory: tests/
