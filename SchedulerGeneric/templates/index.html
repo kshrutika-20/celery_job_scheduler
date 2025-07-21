@@ -12,8 +12,9 @@
         .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
         .status-scheduled, .status-dependent { background-color: #3498db; } /* Blue */
         .status-paused { background-color: #f1c40f; } /* Yellow */
-        .status-failing { background-color: #e74c3c; } /* Red */
+        .status-failing, .status-complete-w-errors { background-color: #e74c3c; } /* Red */
         .status-running { background-color: #9b59b6; } /* Purple */
+        .status-success { background-color: #2ecc71; } /* Green */
         .fa-spin { animation: fa-spin 2s infinite linear; }
         @keyframes fa-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .progress-bar-container { width: 120px; height: 12px; background-color: #e0e0e0; border-radius: 6px; overflow: hidden; border: 1px solid #ccc; }
@@ -50,7 +51,7 @@
                                         {% if job.ui_status == 'Running' %}
                                             <i class="fas fa-sync fa-spin text-purple-600 mr-2"></i>
                                         {% else %}
-                                            <span class="status-dot status-{{ job.ui_status.lower() }}"></span>
+                                            <span class="status-dot status-{{ job.ui_status.lower().replace(' w/ errors', '') }}"></span>
                                         {% endif %}
                                         <span class="text-sm font-medium text-gray-900">{{ job.ui_status }}</span>
                                     </div>
@@ -136,8 +137,7 @@
                     if (processed >= total && total > 0) {
                         clearInterval(activeWorkflows.get(workflowId));
                         activeWorkflows.delete(workflowId);
-                        // Final state will be shown on next page reload from MongoDB data
-                        setTimeout(() => location.reload(), 1000);
+                        setTimeout(() => location.reload(), 1500); // Reload to show final state from DB
                     }
                 })
                 .catch(error => {
@@ -148,13 +148,16 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
-            const runningJobs = document.querySelectorAll('i.fa-spin');
-            runningJobs.forEach(icon => {
+            const runningJobIcons = document.querySelectorAll('i.fa-spin');
+            runningJobIcons.forEach(icon => {
                 const row = icon.closest('tr');
-                const workflowId = row.querySelector('[id^="progress-container-"]')?.id.split('-').pop();
-                if (workflowId && !activeWorkflows.has(workflowId)) {
-                    const intervalId = setInterval(() => updateLiveProgress(workflowId), 3000);
-                    activeWorkflows.set(workflowId, intervalId);
+                const progressContainer = row.querySelector('[id^="progress-container-"]');
+                if (progressContainer) {
+                    const workflowId = progressContainer.id.split('-').pop();
+                    if (workflowId && !activeWorkflows.has(workflowId)) {
+                        const intervalId = setInterval(() => updateLiveProgress(workflowId), 3000);
+                        activeWorkflows.set(workflowId, intervalId);
+                    }
                 }
             });
         });

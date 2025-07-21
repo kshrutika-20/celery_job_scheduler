@@ -145,6 +145,7 @@ from scheduler_app.utils.logger import get_logger
 class RedisCoordinator:
     """
     Manages counters and publishes completion events using Redis.
+    Uses a Lua script for atomic increment-and-check operations.
     """
 
     def __init__(self, redis_url: str = settings.REDIS_URL):
@@ -213,6 +214,10 @@ class RedisCoordinator:
         pipe.get(f"counter:{workflow_id}:total")
         succeeded, failed, total = pipe.execute()
         return {"succeeded": int(succeeded or 0), "failed": int(failed or 0), "total": int(total or 0)}
+
+    def counter_exists(self, workflow_id: str) -> bool:
+        """Checks if a counter is still active for a given workflow."""
+        return bool(self.redis.exists(f"counter:{workflow_id}:total"))
 
 
 # ==============================================================================
@@ -362,11 +367,11 @@ JOB_FUNCTIONS = {
 
 
 # ==============================================================================
-# File: scheduler_app/core/scheduler.py
+# File: scheduler_app/core/scheduler.py (MODIFIED)
 # Description: The core logic for the scheduler application.
 # ==============================================================================
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.mongodb import MongoDBJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
@@ -377,6 +382,17 @@ from scheduler_app.utils.database import get_mongo_client
 from scheduler_app.utils.config import settings
 from scheduler_app.utils.logger import get_logger
 
+# --- Singleton Pattern for SchedulerManager ---
+_scheduler_manager_instance = None
+
+
+def get_scheduler_manager():
+    """Returns the singleton instance of the SchedulerManager."""
+    global _scheduler_manager_instance
+    if _scheduler_manager_instance is None:
+        _scheduler_manager_instance = SchedulerManager()
+    return _scheduler_manager_instance
+
 
 def task_wrapper(job_id: str, parent_trace_id: str | None = None):
     """A robust wrapper that manages the full lifecycle of a job run."""
@@ -385,6 +401,11 @@ def task_wrapper(job_id: str, parent_trace_id: str | None = None):
 
     mongo_client = None
     try:
+        # --- CHANGE: Immediately schedule delayed dependent jobs ---
+        scheduler_manager = get_scheduler_manager()
+        scheduler_manager.schedule_delayed_dependents(job_id, trace_id)
+        # --- END CHANGE ---
+
         mongo_client = get_mongo_client()
         status_collection = mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
         logger.info("Task wrapper executing.")
@@ -402,9 +423,12 @@ def task_wrapper(job_id: str, parent_trace_id: str | None = None):
 
         if not func(trace_id=trace_id, job_id=job_id): raise Exception("Custom function reported a failure.")
 
-        status_collection.update_one({"job_id": job_id, "history.trace_id": trace_id}, {
-            "$set": {"history.$.status": "Success",
-                     "history.$.end_timestamp_utc": datetime.now(timezone.utc).isoformat()}})
+        job_def = next((item for item in JOB_DEFINITIONS if item["id"] == job_id), None)
+        if not job_def.get("is_workflow_starter"):
+            status_collection.update_one({"job_id": job_id, "history.trace_id": trace_id}, {
+                "$set": {"history.$.status": "Success",
+                         "history.$.end_timestamp_utc": datetime.now(timezone.utc).isoformat()}})
+
     except Exception as e:
         logger.error("Execution failed.", error=str(e))
         if mongo_client:
@@ -453,6 +477,29 @@ class SchedulerManager:
                 self.scheduler.add_job(**job_kwargs)
                 self.logger.info("Scheduled job.", job_id=job_id)
 
+    def schedule_delayed_dependents(self, parent_job_id: str, parent_trace_id: str):
+        """
+        CHANGE: New method to handle scheduling of dependents with a delay after TRIGGER.
+        """
+        for job_def in JOB_DEFINITIONS:
+            if parent_job_id in job_def.get("triggers_on_completion_of",
+                                            []) and "delay_after_trigger_minutes" in job_def:
+                next_job_id = job_def["id"]
+                delay_minutes = job_def.get("delay_after_trigger_minutes", 0)
+                run_time = datetime.now(self.scheduler.timezone) + timedelta(minutes=delay_minutes)
+                run_id = f"{next_job_id}_for_{parent_trace_id}"
+
+                logger = get_logger(__name__, parent_job_id=parent_job_id, next_job_id=next_job_id,
+                                    delay_minutes=delay_minutes)
+                logger.info("Scheduling a delayed dependent job.")
+
+                self.scheduler.add_job(
+                    'scheduler_app.core.scheduler:task_wrapper', trigger='date', run_date=run_time,
+                    args=[next_job_id, parent_trace_id],
+                    id=run_id, name=f"{job_def['name']} (after {parent_job_id})",
+                    replace_existing=False
+                )
+
     def start(self):
         self.scheduler.start()
 
@@ -469,11 +516,13 @@ from apscheduler.jobstores.mongodb import MongoDBJobStore
 from scheduler_app.utils.database import get_mongo_client
 from scheduler_app.utils.config import settings
 from scheduler_app.jobs.definitions import JOB_DEFINITIONS
+from scheduler_app.utils.redis_coordinator import RedisCoordinator
 
 
 class SchedulerClient:
     def __init__(self):
         self.mongo_client = get_mongo_client()
+        self.redis_coord = RedisCoordinator()
         self.jobstore = MongoDBJobStore(database=settings.MONGO_DB, collection=settings.MONGO_SCHEDULER_COLLECTION,
                                         client=self.mongo_client)
         self.status_collection = self.mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
@@ -488,7 +537,8 @@ class SchedulerClient:
             status_info = statuses.get(job_id, {})
             history = status_info.get("history", [])
             last_run = history[-1] if history else {}
-            last_status = last_run.get("status", "Unknown")
+            last_status_from_mongo = last_run.get("status", "Unknown")
+            last_workflow_id = last_run.get("trace_id")
 
             live_job_instance = live_jobs.get(job_id)
 
@@ -500,9 +550,14 @@ class SchedulerClient:
 
             if live_job_instance and live_job_instance.next_run_time is None:
                 ui_status = "Paused"
-            elif last_status == "Running":
+            elif last_status_from_mongo == "Running" and job_def.get(
+                    "is_workflow_starter") and self.redis_coord.counter_exists(last_workflow_id):
                 ui_status = "Running"
-            elif last_status == "Failure":
+            elif last_status_from_mongo == "Complete w/ Errors":
+                ui_status = "Complete w/ Errors"
+            elif last_status_from_mongo == "Success":
+                ui_status = "Success"
+            elif last_status_from_mongo == "Failure":
                 ui_status = "Failing"
             elif live_job_instance:
                 ui_status = "Scheduled"
@@ -512,9 +567,9 @@ class SchedulerClient:
             view_model = {
                 "id": job_id,
                 "name": job_def.get("name", job_id),
-                "last_status": last_status,
+                "last_status": last_status_from_mongo,
                 "ui_status": ui_status,
-                "last_workflow_id": last_run.get("trace_id"),
+                "last_workflow_id": last_workflow_id,
                 "is_workflow_starter": job_def.get("is_workflow_starter", False),
                 "last_progress": last_completed_progress,
                 "trigger": str(live_job_instance.trigger) if live_job_instance else "Dependency",
@@ -611,8 +666,8 @@ import uvicorn
 import threading
 import redis
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
-from scheduler_app.core.scheduler import SchedulerManager
+from datetime import datetime
+from scheduler_app.core.scheduler import get_scheduler_manager
 from scheduler_app.api.server import app as fastapi_app
 from scheduler_app.utils.config import settings
 from scheduler_app.utils.redis_coordinator import RedisCoordinator
@@ -621,7 +676,6 @@ from scheduler_app.utils.logger import get_logger
 from scheduler_app.utils.database import get_mongo_client
 
 logger = get_logger(__name__)
-scheduler_manager = SchedulerManager()
 redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
@@ -639,11 +693,19 @@ def pubsub_listener_loop():
             redis_coord = RedisCoordinator()
             progress_data = redis_coord.get_progress(completed_workflow_id)
 
+            final_status = "Success"
+            if progress_data["failed"] > 0:
+                final_status = "Complete w/ Errors"
+
             mongo_client = get_mongo_client()
             status_collection = mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
             status_collection.update_one(
                 {"history.trace_id": completed_workflow_id},
-                {"$set": {"history.$.progress": progress_data}}
+                {"$set": {
+                    "history.$.progress": progress_data,
+                    "history.$.status": final_status,
+                    "history.$.end_timestamp_utc": datetime.now(timezone.utc).isoformat()
+                }}
             )
             mongo_client.close()
             # --- End Persistence Logic ---
@@ -657,17 +719,16 @@ def pubsub_listener_loop():
 
             for job_def in JOB_DEFINITIONS:
                 # A job can be triggered by the completion of ANY of its listed dependencies
-                if completed_job_id in job_def.get("triggers_on_completion_of", []):
+                if completed_job_id in job_def.get("triggers_on_completion_of",
+                                                   []) and "delay_after_trigger_minutes" not in job_def:
                     next_job_id = job_def["id"]
-                    logger.info("Triggering dependent job.", next_job_id=next_job_id, completed_job_id=completed_job_id)
+                    logger.info("Triggering dependent job on completion.", next_job_id=next_job_id,
+                                completed_job_id=completed_job_id)
                     try:
                         run_id = f"{next_job_id}_for_{completed_workflow_id}"
-
-                        delay_minutes = job_def.get("delay_after_trigger_minutes", 0)
-                        run_time = datetime.now(scheduler_manager.scheduler.timezone) + timedelta(minutes=delay_minutes)
-
+                        scheduler_manager = get_scheduler_manager()
                         scheduler_manager.scheduler.add_job(
-                            'scheduler_app.core.scheduler:task_wrapper', trigger='date', run_date=run_time,
+                            'scheduler_app.core.scheduler:task_wrapper', trigger='date',
                             args=[next_job_id, completed_workflow_id],  # Pass parent_trace_id
                             id=run_id, name=f"{job_def['name']} (after {completed_job_id})",
                             replace_existing=False
@@ -680,6 +741,7 @@ def pubsub_listener_loop():
 
 @asynccontextmanager
 async def lifespan(app):
+    scheduler_manager = get_scheduler_manager()
     app.state.scheduler = scheduler_manager.scheduler
     scheduler_manager.schedule_all_jobs()
     scheduler_manager.start()
