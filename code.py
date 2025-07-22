@@ -221,7 +221,7 @@ class RedisCoordinator:
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/definitions.py
+# File: scheduler_app/jobs/definitions.py (MODIFIED)
 # Description: Defines the jobs and their dependencies.
 # ==============================================================================
 JOB_DEFINITIONS = [
@@ -237,29 +237,32 @@ JOB_DEFINITIONS = [
         "id": "fetch_project_permissions",
         "name": "Fetch Project Permissions",
         "function": "fetch_project_permissions",
-        "triggers_on_completion_of": ["fetch_projects"],
+        "triggers_on_completion_of": ["fetch_projects"],  # Runs after fetch_projects workflow is complete
         "is_workflow_starter": True
     },
     {
         "id": "fetch_repo",
         "name": "Fetch All Repositories",
         "function": "fetch_repo",
-        "triggers_on_completion_of": ["fetch_projects"],
+        "triggers_on_completion_of": ["fetch_projects"],  # Runs after fetch_projects workflow is complete
         "is_workflow_starter": True
     },
     {
         "id": "fetch_labels",
         "name": "Fetch All Labels",
         "function": "fetch_labels",
-        "triggers_on_completion_of": ["fetch_repo"],
+        "triggers_on_completion_of": ["fetch_repo"],  # Runs after fetch_repo workflow is complete
         "is_workflow_starter": True
     },
     {
         "id": "fetch_repo_permissions",
         "name": "Fetch Repository Permissions",
         "function": "fetch_repo_permissions",
-        "triggers_on_completion_of": ["fetch_labels"],
-        "delay_after_trigger_minutes": 30,
+        # --- CHANGE: New key to define dependencies that run after a DELAY from the PARENT TRIGGER ---
+        "triggers_on_start_of": {
+            "job_id": "fetch_labels",
+            "delay_minutes": 30
+        },
         "is_workflow_starter": True
     },
 ]
@@ -403,7 +406,7 @@ def task_wrapper(job_id: str, parent_trace_id: str | None = None):
     try:
         # --- CHANGE: Immediately schedule delayed dependent jobs ---
         scheduler_manager = get_scheduler_manager()
-        scheduler_manager.schedule_delayed_dependents(job_id, trace_id)
+        scheduler_manager.schedule_on_start_dependents(job_id, trace_id)
         # --- END CHANGE ---
 
         mongo_client = get_mongo_client()
@@ -477,15 +480,15 @@ class SchedulerManager:
                 self.scheduler.add_job(**job_kwargs)
                 self.logger.info("Scheduled job.", job_id=job_id)
 
-    def schedule_delayed_dependents(self, parent_job_id: str, parent_trace_id: str):
+    def schedule_on_start_dependents(self, parent_job_id: str, parent_trace_id: str):
         """
         CHANGE: New method to handle scheduling of dependents with a delay after TRIGGER.
         """
         for job_def in JOB_DEFINITIONS:
-            if parent_job_id in job_def.get("triggers_on_completion_of",
-                                            []) and "delay_after_trigger_minutes" in job_def:
+            dependency_info = job_def.get("triggers_on_start_of")
+            if dependency_info and dependency_info.get("job_id") == parent_job_id:
                 next_job_id = job_def["id"]
-                delay_minutes = job_def.get("delay_after_trigger_minutes", 0)
+                delay_minutes = dependency_info.get("delay_minutes", 0)
                 run_time = datetime.now(self.scheduler.timezone) + timedelta(minutes=delay_minutes)
                 run_id = f"{next_job_id}_for_{parent_trace_id}"
 
@@ -548,6 +551,7 @@ class SchedulerClient:
                     last_completed_progress = run["progress"]
                     break
 
+            # Determine the most accurate UI status
             if live_job_instance and live_job_instance.next_run_time is None:
                 ui_status = "Paused"
             elif last_status_from_mongo == "Running" and job_def.get(
@@ -758,7 +762,6 @@ if __name__ == "__main__":
     logger.info("Starting combined Scheduler and API server...")
     uvicorn.run("scheduler_app.main:fastapi_app", host="0.0.0.0", port=8000, reload=True)
 
-
 # ==============================================================================
 # Directory: tests/
 # Description: Contains all unit tests for the application.
@@ -851,6 +854,75 @@ class TestApi(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), mock_progress)
         mock_redis_coord.get_progress.assert_called_once_with("wf-123")
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+# ==============================================================================
+# File: tests/test_scheduler.py (NEW)
+# Description: Unit tests for the SchedulerManager and core logic.
+# ==============================================================================
+import unittest
+from unittest.mock import patch, MagicMock, ANY
+from scheduler_app.core.scheduler import SchedulerManager, get_scheduler_manager, task_wrapper
+from scheduler_app.jobs.definitions import JOB_DEFINITIONS
+
+
+# Mock the singleton instance for testing
+@patch('scheduler_app.core.scheduler._scheduler_manager_instance', new_callable=MagicMock)
+class TestScheduler(unittest.TestCase):
+
+    @patch('scheduler_app.core.scheduler.get_mongo_client')
+    @patch('apscheduler.schedulers.background.BackgroundScheduler')
+    def test_scheduler_manager_initialization(self, mock_bgscheduler, mock_get_mongo, mock_instance):
+        """Test that SchedulerManager initializes correctly."""
+        # Reset singleton for clean test
+        mock_instance = None
+        manager = SchedulerManager()
+
+        mock_get_mongo.assert_called_once()
+        mock_bgscheduler.assert_called_once()
+        self.assertIsNotNone(manager.scheduler)
+        self.assertIn('fetch_projects', manager.job_definitions)
+
+    @patch('scheduler_app.core.scheduler.get_mongo_client')
+    @patch('apscheduler.schedulers.background.BackgroundScheduler')
+    def test_schedule_all_jobs(self, mock_bgscheduler, mock_get_mongo, mock_instance):
+        """Test that only jobs with a 'trigger' are scheduled."""
+        mock_scheduler_instance = mock_bgscheduler.return_value
+        mock_instance = None
+        manager = SchedulerManager()
+        manager.schedule_all_jobs()
+
+        # Should be called once for 'fetch_projects' which has a cron trigger
+        self.assertEqual(mock_scheduler_instance.add_job.call_count, 1)
+        # Verify it was called for the correct job
+        mock_scheduler_instance.add_job.assert_called_with(
+            id='fetch_projects',
+            name=ANY, func=ANY, args=ANY, trigger=ANY, executor=ANY,
+            max_instances=ANY, replace_existing=True, hour=6, timezone='Asia/Kolkata'
+        )
+
+    @patch('scheduler_app.core.scheduler.get_scheduler_manager')
+    @patch('scheduler_app.core.scheduler.get_mongo_client')
+    @patch('scheduler_app.jobs.functions.JOB_FUNCTIONS')
+    def test_task_wrapper_schedules_delayed_dependents(self, mock_job_functions, mock_get_mongo, mock_get_manager,
+                                                       mock_instance):
+        """Verify that the task_wrapper correctly schedules a delayed job."""
+
+        # Setup mocks
+        mock_manager = MagicMock()
+        mock_get_manager.return_value = mock_manager
+
+        # Mock the actual job function to return True (success)
+        mock_job_functions.get.return_value.return_value = True
+
+        # Call the wrapper for 'fetch_labels', which should trigger 'fetch_repo_permissions'
+        task_wrapper('fetch_labels')
+
+        # Check that the method to schedule delayed jobs was called correctly
+        mock_manager.schedule_on_start_dependents.assert_called_once_with('fetch_labels', ANY)
 
 
 if __name__ == '__main__':
