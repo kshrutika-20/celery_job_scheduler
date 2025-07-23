@@ -1,31 +1,62 @@
-# --- tests/test_scheduler.py ---
-import unittest
-from unittest.mock import patch, MagicMock, ANY
-from scheduler_app.core.scheduler import SchedulerManager, task_wrapper
+# ===============================
+# Unit Test for API Endpoints
+# ===============================
 
-@patch('scheduler_app.core.scheduler.MongoDBAdapter')
-@patch('scheduler_app.core.scheduler.pymongo.MongoClient')  # <-- add this
-@patch('apscheduler.schedulers.background.BackgroundScheduler')
-class TestScheduler(unittest.TestCase):
+import pytest
+from httpx import AsyncClient
+from fastapi.testclient import TestClient
+from unittest.mock import MagicMock, patch
+from scheduler_app.api.fastapi_server import app
 
-    def test_scheduler_manager_initialization(self, mock_scheduler, mock_mongo_client, mock_mongo_adapter):
-        mock_scheduler.return_value = MagicMock()
-        mock_mongo_adapter.return_value = MagicMock()
-        manager = SchedulerManager()
-        self.assertIsNotNone(manager.scheduler)
+client = TestClient(app)
 
-    def test_schedule_all_jobs(self, mock_scheduler, mock_mongo_client, mock_mongo_adapter):
-        scheduler_instance = mock_scheduler.return_value
-        mock_mongo_adapter.return_value = MagicMock()
-        manager = SchedulerManager()
-        manager.schedule_all_jobs()
-        scheduler_instance.add_job.assert_called()
+@patch("scheduler_app.api.fastapi_server.client")
+def test_get_jobs(mock_client):
+    mock_client.get_all_jobs.return_value = [{"id": "job1"}, {"id": "job2"}]
+    response = client.get("/api/jobs")
+    assert response.status_code == 200
+    assert len(response.json()) == 2
 
-    @patch('scheduler_app.core.scheduler.get_scheduler_manager')
-    @patch('scheduler_app.jobs.functions.JOB_FUNCTIONS')
-    def test_task_wrapper(self, mock_job_functions, mock_get_mgr, mock_scheduler, mock_mongo_client, mock_mongo_adapter):
-        mock_mgr = MagicMock()
-        mock_get_mgr.return_value = mock_mgr
-        mock_job_functions.get.return_value.return_value = True
-        task_wrapper('fetch_labels')
-        mock_mgr.schedule_on_start_dependents.assert_called_once_with('fetch_labels', ANY)
+@patch("scheduler_app.api.fastapi_server.redis_coord")
+def test_get_job_progress(mock_redis):
+    mock_redis.get_progress.return_value = {"progress": 70}
+    response = client.get("/api/progress/test_workflow")
+    assert response.status_code == 200
+    assert response.json()["progress"] == 70
+
+@patch("scheduler_app.api.fastapi_server.client")
+def test_read_root_success(mock_client):
+    mock_client.get_all_jobs.return_value = []
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+@patch("scheduler_app.api.fastapi_server.get_logger")
+@patch("scheduler_app.api.fastapi_server.client")
+def test_read_root_failure(mock_client, mock_logger):
+    mock_client.get_all_jobs.side_effect = Exception("Mock failure")
+    mock_logger.return_value = MagicMock()
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+@patch("scheduler_app.api.fastapi_server._job_or_404")
+def test_pause_job(mock_job):
+    request = MagicMock()
+    request.app.state.scheduler.pause_job = MagicMock()
+    response = client.post("/api/jobs/test_job/pause", json={}, headers={"content-type": "application/json"})
+    assert response.status_code == 200
+
+@patch("scheduler_app.api.fastapi_server._job_or_404")
+def test_resume_job(mock_job):
+    request = MagicMock()
+    request.app.state.scheduler.resume_job = MagicMock()
+    response = client.post("/api/jobs/test_job/resume", json={}, headers={"content-type": "application/json"})
+    assert response.status_code == 200
+
+@patch("scheduler_app.api.fastapi_server._job_or_404")
+def test_delete_job(mock_job):
+    request = MagicMock()
+    request.app.state.scheduler.remove_job = MagicMock()
+    response = client.delete("/api/jobs/test_job")
+    assert response.status_code == 200
