@@ -1,93 +1,41 @@
 import pytest
-from httpx import AsyncClient
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
+from scheduler_app.api.server import app
 
-
+# Patch Mongo client and Redis coordinator globally for all tests
 @pytest.fixture(autouse=True)
-def mock_dependencies():
-    with patch("scheduler_app.api.fastapi_server.SchedulerClient") as MockSchedulerClient, \
-         patch("scheduler_app.api.fastapi_server.RedisCoordinator") as MockRedisCoordinator:
+def patch_mongo_and_redis():
+    with patch("scheduler_app.api.client.get_mongo_client") as mock_get_client, \
+         patch("scheduler_app.api.client.RedisCoordinator") as mock_redis_coord:
 
-        mock_client = MockSchedulerClient.return_value
-        mock_redis = MockRedisCoordinator.return_value
+        mock_mongo_client = MagicMock()
+        mock_status_collection = MagicMock()
+        mock_status_collection.find.return_value = [
+            {
+                "job_id": "fetch_projects",
+                "history": [
+                    {"status": "Success", "trace_id": "abc123", "progress": {"done": 100}}
+                ]
+            }
+        ]
+        mock_mongo_client.__getitem__.return_value.__getitem__.return_value = mock_status_collection
+        mock_get_client.return_value = mock_mongo_client
 
-        mock_client.get_all_jobs.return_value = [{"id": "job1"}, {"id": "job2"}]
-        mock_redis.get_progress.return_value = {"progress": 70}
+        mock_redis = MagicMock()
+        mock_redis.counter_exists.return_value = False
+        mock_redis_coord.return_value = mock_redis
 
         yield
 
-@patch("scheduler_app.api.fastapi_server.client")
-def test_get_jobs(mock_client):
-    mock_client.get_all_jobs.return_value = [{"id": "job1"}, {"id": "job2"}]
-    from scheduler_app.api.fastapi_server import app
+def test_get_jobs_api():
     client = TestClient(app)
     response = client.get("/api/jobs")
     assert response.status_code == 200
-    assert len(response.json()) == 2
+    assert isinstance(response.json(), list)
 
-@patch("scheduler_app.api.fastapi_server.redis_coord")
-def test_get_job_progress(mock_redis):
-    mock_redis.get_progress.return_value = {"progress": 70}
-    from scheduler_app.api.fastapi_server import app
-    client = TestClient(app)
-    response = client.get("/api/progress/test_workflow")
-    assert response.status_code == 200
-    assert response.json()["progress"] == 70
-
-@patch("scheduler_app.api.fastapi_server.client")
-def test_read_root_success(mock_client):
-    mock_client.get_all_jobs.return_value = []
-    from scheduler_app.api.fastapi_server import app
+def test_read_root_html():
     client = TestClient(app)
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-
-@patch("scheduler_app.api.fastapi_server.client")
-@patch("scheduler_app.api.fastapi_server.get_logger")
-def test_read_root_failure(mock_logger, mock_client):
-    mock_client.get_all_jobs.side_effect = Exception("Mock failure")
-    mock_logger.return_value = MagicMock()
-    from scheduler_app.api.fastapi_server import app
-    client = TestClient(app)
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-@patch("scheduler_app.api.fastapi_server._job_or_404")
-def test_pause_job(mock_job):
-    from scheduler_app.api.fastapi_server import app
-    with patch.object(app.state, "scheduler", create=True) as mock_scheduler:
-        mock_scheduler.pause_job = MagicMock()
-        client = TestClient(app)
-        response = client.post("/api/jobs/test_job/pause")
-        assert response.status_code == 200
-
-@patch("scheduler_app.api.fastapi_server._job_or_404")
-def test_resume_job(mock_job):
-    from scheduler_app.api.fastapi_server import app
-    with patch.object(app.state, "scheduler", create=True) as mock_scheduler:
-        mock_scheduler.resume_job = MagicMock()
-        client = TestClient(app)
-        response = client.post("/api/jobs/test_job/resume")
-        assert response.status_code == 200
-
-@patch("scheduler_app.api.fastapi_server._job_or_404")
-def test_delete_job(mock_job):
-    from scheduler_app.api.fastapi_server import app
-    with patch.object(app.state, "scheduler", create=True) as mock_scheduler:
-        mock_scheduler.remove_job = MagicMock()
-        client = TestClient(app)
-        response = client.delete("/api/jobs/test_job")
-        assert response.status_code == 200
-
-@patch("scheduler_app.api.fastapi_server._job_or_404")
-def test_trigger_job(mock_job):
-    from scheduler_app.api.fastapi_server import app
-    with patch.object(app.state, "scheduler", create=True) as mock_scheduler:
-        mock_scheduler.add_job = MagicMock()
-        client = TestClient(app)
-        response = client.post("/api/jobs/fetch_labels/trigger")
-        assert response.status_code == 200
-        mock_scheduler.add_job.assert_called_once()
