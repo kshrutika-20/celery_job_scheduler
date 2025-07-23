@@ -134,7 +134,7 @@ def get_mongo_client() -> MongoClient:
 
 
 # ==============================================================================
-# File: scheduler_app/utils/redis_coordinator.py
+# File: scheduler_app/utils/redis_coordinator.py (MODIFIED)
 # Description: Manages distributed counters and pub/sub events for task coordination.
 # ==============================================================================
 import redis
@@ -145,7 +145,6 @@ from scheduler_app.utils.logger import get_logger
 class RedisCoordinator:
     """
     Manages counters and publishes completion events using Redis.
-    Uses a Lua script for atomic increment-and-check operations.
     """
 
     def __init__(self, redis_url: str = settings.REDIS_URL):
@@ -174,18 +173,35 @@ class RedisCoordinator:
         """
         self.finisher_script = self.redis.register_script(lua_script)
 
-    def init_counter(self, workflow_id: str, total_count: int, job_id: str):
+    def add_to_total(self, workflow_id: str, count_to_add: int, job_id: str):
+        """
+        Atomically increments the total expected count for a workflow.
+        This is the new core method for the Producer.
+        """
         logger = get_logger(__name__, workflow_id=workflow_id, job_id=job_id)
-        logger.info("Initializing Redis counter.", total_items=total_count)
+        logger.info(f"Adding {count_to_add} to total count.")
+
         pipe = self.redis.pipeline()
-        pipe.set(f"counter:{workflow_id}:succeeded", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
-        pipe.set(f"counter:{workflow_id}:failed", 0, ex=settings.REDIS_COUNTER_TTL_SECONDS)
-        pipe.set(f"counter:{workflow_id}:total", total_count, ex=settings.REDIS_COUNTER_TTL_SECONDS)
-        pipe.set(f"workflow_info:{workflow_id}", job_id, ex=settings.REDIS_COUNTER_TTL_SECONDS)
+        total_key = f"counter:{workflow_id}:total"
+
+        # Atomically add to the total
+        pipe.incrby(total_key, count_to_add)
+
+        # Set expiry only if the key is new (i.e., this is the first batch)
+        pipe.expire(total_key, settings.REDIS_COUNTER_TTL_SECONDS, nx=True)
+        pipe.expire(f"counter:{workflow_id}:succeeded", settings.REDIS_COUNTER_TTL_SECONDS, nx=True)
+        pipe.expire(f"counter:{workflow_id}:failed", settings.REDIS_COUNTER_TTL_SECONDS, nx=True)
+        pipe.expire(f"workflow_info:{workflow_id}", settings.REDIS_COUNTER_TTL_SECONDS, nx=True)
+
+        # Ensure the other keys exist if this is the first call
+        pipe.setnx(f"counter:{workflow_id}:succeeded", 0)
+        pipe.setnx(f"counter:{workflow_id}:failed", 0)
+        pipe.setnx(f"workflow_info:{workflow_id}", job_id)
+
         pipe.execute()
 
     def _increment(self, workflow_id: str, counter_type: str):
-        """Internal method to call the atomic Lua script."""
+        """Internal method to call the atomic Lua script for workers."""
         key_to_incr = f"counter:{workflow_id}:{counter_type}"
         succeeded_key = f"counter:{workflow_id}:succeeded"
         failed_key = f"counter:{workflow_id}:failed"
@@ -221,7 +237,7 @@ class RedisCoordinator:
 
 
 # ==============================================================================
-# File: scheduler_app/jobs/definitions.py (MODIFIED)
+# File: scheduler_app/jobs/definitions.py
 # Description: Defines the jobs and their dependencies.
 # ==============================================================================
 JOB_DEFINITIONS = [
@@ -237,28 +253,27 @@ JOB_DEFINITIONS = [
         "id": "fetch_project_permissions",
         "name": "Fetch Project Permissions",
         "function": "fetch_project_permissions",
-        "triggers_on_completion_of": ["fetch_projects"],  # Runs after fetch_projects workflow is complete
+        "triggers_on_completion_of": ["fetch_projects"],
         "is_workflow_starter": True
     },
     {
         "id": "fetch_repo",
         "name": "Fetch All Repositories",
         "function": "fetch_repo",
-        "triggers_on_completion_of": ["fetch_projects"],  # Runs after fetch_projects workflow is complete
+        "triggers_on_completion_of": ["fetch_projects"],
         "is_workflow_starter": True
     },
     {
         "id": "fetch_labels",
         "name": "Fetch All Labels",
         "function": "fetch_labels",
-        "triggers_on_completion_of": ["fetch_repo"],  # Runs after fetch_repo workflow is complete
+        "triggers_on_completion_of": ["fetch_repo"],
         "is_workflow_starter": True
     },
     {
         "id": "fetch_repo_permissions",
         "name": "Fetch Repository Permissions",
         "function": "fetch_repo_permissions",
-        # --- CHANGE: New key to define dependencies that run after a DELAY from the PARENT TRIGGER ---
         "triggers_on_start_of": {
             "job_id": "fetch_labels",
             "delay_minutes": 30
@@ -339,6 +354,56 @@ JOB_FUNCTIONS = {
 }
 
 # ==============================================================================
+# File: conceptual_producer.py (NEW - FOR REFERENCE)
+# Description: Shows how your separate Producer service should be implemented.
+# ==============================================================================
+# from fastapi import FastAPI
+# from pydantic import BaseModel
+# from scheduler_app.utils.redis_coordinator import RedisCoordinator
+# from scheduler_app.utils.config import settings
+# from scheduler_app.utils.logger import get_logger
+
+# app = FastAPI()
+# redis_coord = RedisCoordinator(redis_url=settings.REDIS_URL)
+
+# class WorkflowRequest(BaseModel):
+#     workflow_id: str
+#     job_id: str
+
+# @app.post("/produce/fetch-repos")
+# def produce_fetch_repos_tasks(request: WorkflowRequest):
+#     """
+#     This endpoint lives in your separate Producer repo.
+#     It's called by the scheduler.
+#     """
+#     logger = get_logger(__name__, workflow_id=request.workflow_id, job_id=request.job_id)
+#     logger.info("Received request to produce fetch-repo tasks.")
+
+#     # 1. Get the list of items to process from the source (e.g., Bitbucket)
+#     # This might involve multiple paginated API calls.
+#     repo_urls = ["http://repo1.com", "http://repo2.com", "http://repo3.com"] # MOCK
+#     num_tasks = len(repo_urls)
+
+#     # 2. Atomically add the number of new tasks to the workflow's total count.
+#     # This is the crucial step that solves the race condition.
+#     redis_coord.add_to_total(
+#         workflow_id=request.workflow_id,
+#         count_to_add=num_tasks,
+#         job_id=request.job_id
+#     )
+
+#     # 3. Enqueue the individual tasks for the Celery workers.
+#     for url in repo_urls:
+#         # Your logic to push to a Redis list that Celery monitors.
+#         # The message MUST contain the workflow_id.
+#         # enqueue_celery_task("process_single_repo", repo_url=url, workflow_id=request.workflow_id)
+#         pass
+
+#     logger.info(f"Enqueued {num_tasks} tasks for workflow.")
+#     return {"status": "ok", "tasks_enqueued": num_tasks}
+
+
+# ==============================================================================
 # File: conceptual_celery_worker.py (For Reference)
 # ==============================================================================
 # from celery import Celery
@@ -370,7 +435,7 @@ JOB_FUNCTIONS = {
 
 
 # ==============================================================================
-# File: scheduler_app/core/scheduler.py (MODIFIED)
+# File: scheduler_app/core/scheduler.py
 # Description: The core logic for the scheduler application.
 # ==============================================================================
 import uuid
@@ -404,10 +469,8 @@ def task_wrapper(job_id: str, parent_trace_id: str | None = None):
 
     mongo_client = None
     try:
-        # --- CHANGE: Immediately schedule delayed dependent jobs ---
         scheduler_manager = get_scheduler_manager()
         scheduler_manager.schedule_on_start_dependents(job_id, trace_id)
-        # --- END CHANGE ---
 
         mongo_client = get_mongo_client()
         status_collection = mongo_client[settings.MONGO_DB][settings.MONGO_STATUS_COLLECTION]
@@ -482,9 +545,9 @@ class SchedulerManager:
 
     def schedule_on_start_dependents(self, parent_job_id: str, parent_trace_id: str):
         """
-        CHANGE: New method to handle scheduling of dependents with a delay after TRIGGER.
+        Schedules dependent jobs that are configured to run with a delay after the parent job starts.
         """
-        for job_def in JOB_DEFINITIONS:
+        for job_def in self.job_definitions.values():
             dependency_info = job_def.get("triggers_on_start_of")
             if dependency_info and dependency_info.get("job_id") == parent_job_id:
                 next_job_id = job_def["id"]
@@ -496,12 +559,15 @@ class SchedulerManager:
                                     delay_minutes=delay_minutes)
                 logger.info("Scheduling a delayed dependent job.")
 
-                self.scheduler.add_job(
-                    'scheduler_app.core.scheduler:task_wrapper', trigger='date', run_date=run_time,
-                    args=[next_job_id, parent_trace_id],
-                    id=run_id, name=f"{job_def['name']} (after {parent_job_id})",
-                    replace_existing=False
-                )
+                try:
+                    self.scheduler.add_job(
+                        'scheduler_app.core.scheduler:task_wrapper', trigger='date', run_date=run_time,
+                        args=[next_job_id, parent_trace_id],
+                        id=run_id, name=f"{job_def['name']} (after {parent_job_id})",
+                        replace_existing=False
+                    )
+                except Exception as e:
+                    logger.error("Failed to schedule delayed dependent job.", error=str(e))
 
     def start(self):
         self.scheduler.start()
@@ -724,7 +790,7 @@ def pubsub_listener_loop():
             for job_def in JOB_DEFINITIONS:
                 # A job can be triggered by the completion of ANY of its listed dependencies
                 if completed_job_id in job_def.get("triggers_on_completion_of",
-                                                   []) and "delay_after_trigger_minutes" not in job_def:
+                                                   []) and "triggers_on_start_of" not in job_def:
                     next_job_id = job_def["id"]
                     logger.info("Triggering dependent job on completion.", next_job_id=next_job_id,
                                 completed_job_id=completed_job_id)
@@ -762,168 +828,4 @@ if __name__ == "__main__":
     logger.info("Starting combined Scheduler and API server...")
     uvicorn.run("scheduler_app.main:fastapi_app", host="0.0.0.0", port=8000, reload=True)
 
-# ==============================================================================
-# Directory: tests/
-# Description: Contains all unit tests for the application.
-# ==============================================================================
-
-# ==============================================================================
-# File: tests/__init__.py
-# Description: Makes the directory a Python package.
-# ==============================================================================
-
-
-# ==============================================================================
-# File: tests/test_redis_coordinator.py
-# Description: Unit tests for the RedisCoordinator class.
-# ==============================================================================
-import unittest
-from unittest.mock import MagicMock, patch
-from scheduler_app.utils.redis_coordinator import RedisCoordinator
-
-
-class TestRedisCoordinator(unittest.TestCase):
-
-    @patch('redis.Redis.from_url')
-    def setUp(self, mock_redis_from_url):
-        self.mock_redis = MagicMock()
-        mock_redis_from_url.return_value = self.mock_redis
-        self.coordinator = RedisCoordinator()
-        self.coordinator.finisher_script = MagicMock()
-
-    def test_init_counter(self):
-        mock_pipeline = self.mock_redis.pipeline.return_value
-        self.coordinator.init_counter(workflow_id="test-123", total_count=100, job_id="job-abc")
-
-        self.mock_redis.pipeline.assert_called_once()
-        mock_pipeline.set.assert_any_call("counter:test-123:succeeded", 0, ex=86400)
-        mock_pipeline.set.assert_any_call("counter:test-123:failed", 0, ex=86400)
-        mock_pipeline.set.assert_any_call("counter:test-123:total", 100, ex=86400)
-        mock_pipeline.set.assert_any_call("workflow_info:test-123", "job-abc", ex=86400)
-        mock_pipeline.execute.assert_called_once()
-
-    def test_increment_success(self):
-        self.coordinator.increment_success(workflow_id="test-456")
-        self.coordinator.finisher_script.assert_called_once_with(
-            keys=['counter:test-456:succeeded', 'counter:test-456:succeeded', 'counter:test-456:failed',
-                  'counter:test-456:total'],
-            args=['workflow_completion_events', 'test-456']
-        )
-
-    def test_increment_failure(self):
-        self.coordinator.increment_failure(workflow_id="test-789")
-        self.coordinator.finisher_script.assert_called_once_with(
-            keys=['counter:test-789:failed', 'counter:test-789:succeeded', 'counter:test-789:failed',
-                  'counter:test-789:total'],
-            args=['workflow_completion_events', 'test-789']
-        )
-
-
-if __name__ == '__main__':
-    unittest.main()
-
-# ==============================================================================
-# File: tests/test_api.py
-# Description: Unit tests for the FastAPI server endpoints.
-# ==============================================================================
-import unittest
-from unittest.mock import patch, MagicMock
-from fastapi.testclient import TestClient
-from scheduler_app.api.server import app
-
-
-class TestApi(unittest.TestCase):
-
-    def setUp(self):
-        self.client = TestClient(app)
-
-    @patch('scheduler_app.api.server.client')
-    def test_get_jobs_success(self, mock_scheduler_client):
-        mock_jobs = [{"id": "job-1", "name": "Test Job 1"}]
-        mock_scheduler_client.get_all_jobs.return_value = mock_jobs
-        response = self.client.get("/api/jobs")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), mock_jobs)
-        mock_scheduler_client.get_all_jobs.assert_called_once()
-
-    @patch('scheduler_app.api.server.redis_coord')
-    def test_get_progress_success(self, mock_redis_coord):
-        mock_progress = {"succeeded": 50, "failed": 5, "total": 100}
-        mock_redis_coord.get_progress.return_value = mock_progress
-        response = self.client.get("/api/progress/wf-123")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), mock_progress)
-        mock_redis_coord.get_progress.assert_called_once_with("wf-123")
-
-
-if __name__ == '__main__':
-    unittest.main()
-
-# ==============================================================================
-# File: tests/test_scheduler.py (NEW)
-# Description: Unit tests for the SchedulerManager and core logic.
-# ==============================================================================
-import unittest
-from unittest.mock import patch, MagicMock, ANY
-from scheduler_app.core.scheduler import SchedulerManager, get_scheduler_manager, task_wrapper
-from scheduler_app.jobs.definitions import JOB_DEFINITIONS
-
-
-# Mock the singleton instance for testing
-@patch('scheduler_app.core.scheduler._scheduler_manager_instance', new_callable=MagicMock)
-class TestScheduler(unittest.TestCase):
-
-    @patch('scheduler_app.core.scheduler.get_mongo_client')
-    @patch('apscheduler.schedulers.background.BackgroundScheduler')
-    def test_scheduler_manager_initialization(self, mock_bgscheduler, mock_get_mongo, mock_instance):
-        """Test that SchedulerManager initializes correctly."""
-        # Reset singleton for clean test
-        mock_instance = None
-        manager = SchedulerManager()
-
-        mock_get_mongo.assert_called_once()
-        mock_bgscheduler.assert_called_once()
-        self.assertIsNotNone(manager.scheduler)
-        self.assertIn('fetch_projects', manager.job_definitions)
-
-    @patch('scheduler_app.core.scheduler.get_mongo_client')
-    @patch('apscheduler.schedulers.background.BackgroundScheduler')
-    def test_schedule_all_jobs(self, mock_bgscheduler, mock_get_mongo, mock_instance):
-        """Test that only jobs with a 'trigger' are scheduled."""
-        mock_scheduler_instance = mock_bgscheduler.return_value
-        mock_instance = None
-        manager = SchedulerManager()
-        manager.schedule_all_jobs()
-
-        # Should be called once for 'fetch_projects' which has a cron trigger
-        self.assertEqual(mock_scheduler_instance.add_job.call_count, 1)
-        # Verify it was called for the correct job
-        mock_scheduler_instance.add_job.assert_called_with(
-            id='fetch_projects',
-            name=ANY, func=ANY, args=ANY, trigger=ANY, executor=ANY,
-            max_instances=ANY, replace_existing=True, hour=6, timezone='Asia/Kolkata'
-        )
-
-    @patch('scheduler_app.core.scheduler.get_scheduler_manager')
-    @patch('scheduler_app.core.scheduler.get_mongo_client')
-    @patch('scheduler_app.jobs.functions.JOB_FUNCTIONS')
-    def test_task_wrapper_schedules_delayed_dependents(self, mock_job_functions, mock_get_mongo, mock_get_manager,
-                                                       mock_instance):
-        """Verify that the task_wrapper correctly schedules a delayed job."""
-
-        # Setup mocks
-        mock_manager = MagicMock()
-        mock_get_manager.return_value = mock_manager
-
-        # Mock the actual job function to return True (success)
-        mock_job_functions.get.return_value.return_value = True
-
-        # Call the wrapper for 'fetch_labels', which should trigger 'fetch_repo_permissions'
-        task_wrapper('fetch_labels')
-
-        # Check that the method to schedule delayed jobs was called correctly
-        mock_manager.schedule_on_start_dependents.assert_called_once_with('fetch_labels', ANY)
-
-
-if __name__ == '__main__':
-    unittest.main()
+    
