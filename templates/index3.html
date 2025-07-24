@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body class="bg-gray-100 text-gray-800">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-6">Job Monitor</h1>
+        <div class="overflow-x-auto">
+            <table class="min-w-full bg-white rounded-lg shadow">
+                <thead>
+                    <tr class="bg-gray-200 text-left text-sm uppercase font-semibold">
+                        <th class="py-3 px-6">Status</th>
+                        <th class="py-3 px-6">Job Name</th>
+                        <th class="py-3 px-6">Next Run (IST)</th>
+                        <th class="py-3 px-6">Trigger Details</th>
+                        <th class="py-3 px-6">Last Outcome</th>
+                        <th class="py-3 px-6 text-center">Last Run Progress</th>
+                        <th class="py-3 px-6 text-center">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in jobs %}
+                    <tr class="border-b hover:bg-gray-50">
+                        <td class="py-3 px-6">
+                            <div class="flex items-center">
+                                {% if job.ui_status == 'Running' %}
+                                    <i class="fas fa-sync fa-spin text-purple-600 mr-2"></i>
+                                {% else %}
+                                    <span class="h-3 w-3 rounded-full inline-block mr-2 {{ 'bg-blue-500' if job.ui_status in ['Scheduled', 'Dependent'] else 'bg-yellow-400' if job.ui_status == 'Paused' else 'bg-red-500' if job.ui_status == 'Failing' else 'bg-purple-500' }}"></span>
+                                {% endif %}
+                                {{ job.ui_status }}
+                            </div>
+                        </td>
+                        <td class="py-3 px-6">
+                            <div class="text-sm font-semibold">{{ job.name }}</div>
+                            <div class="text-xs text-gray-500">{{ job.id }}</div>
+                        </td>
+                        <td class="py-3 px-6">
+                            <div class="text-sm">{{ job.next_run_human }}</div>
+                            <div class="text-xs text-gray-500">{{ job.next_run_local }}</div>
+                        </td>
+                        <td class="py-3 px-6 font-mono text-sm text-gray-600">{{ job.trigger }}</td>
+                        <td class="py-3 px-6">
+                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full
+                                {{ 'bg-green-100 text-green-800' if job.last_status == 'Success' else 'bg-red-100 text-red-800' if job.last_status == 'Failure' else 'bg-gray-100 text-gray-800' }}">
+                                {{ job.last_status }}
+                            </span>
+                        </td>
+                        <td class="py-3 px-6 text-center">
+                            {% if job.is_workflow_starter and job.last_workflow_id %}
+                            <div class="w-full bg-white border border-gray-300 rounded-full h-5 relative overflow-hidden" title="{{ job.last_progress.succeeded | default(0) }} Succeeded, {{ job.last_progress.failed | default(0) }} Failed, {{ job.last_progress.total | default(0) }} Total">
+                                <div id="progress-bar-{{ job.last_workflow_id }}"
+                                     class="h-full text-xs text-white text-center leading-5 transition-all duration-500 ease-in-out {{ 'bg-red-500' if job.last_progress.failed > 0 else 'bg-green-500' }}"
+                                     style="width: 0%">
+                                    0%
+                                </div>
+                            </div>
+                            <div class="text-xs text-gray-600 mt-1">{{ job.last_progress.succeeded + job.last_progress.failed }}/{{ job.last_progress.total }}</div>
+                            {% else %}
+                            <span class="text-gray-400">N/A</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 px-6 text-center">
+                            <button onclick="handleAction('{{ job.id }}', 'trigger')" class="text-blue-600 hover:text-blue-800 mr-3" title="Trigger">
+                                <i class="fas fa-bolt"></i>
+                            </button>
+                            <button onclick="handleAction('{{ job.id }}', 'pause')" class="text-yellow-500 hover:text-yellow-700 mr-3" title="Pause">
+                                <i class="fas fa-pause"></i>
+                            </button>
+                            <button onclick="handleAction('{{ job.id }}', 'resume')" class="text-green-600 hover:text-green-800 mr-3" title="Resume">
+                                <i class="fas fa-play"></i>
+                            </button>
+                            <button onclick="handleAction('{{ job.id }}', 'delete')" class="text-red-600 hover:text-red-800" title="Delete">
+                                <i class="fas fa-trash-alt"></i>
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+      const workflowIds = {{ jobs | map(attribute='last_workflow_id') | select | list | tojson }};
+
+      function fetchProgress(workflowId) {
+        fetch(`/api/progress/${workflowId}`)
+          .then(res => res.json())
+          .then(data => {
+            const succeeded = data.succeeded || 0;
+            const failed = data.failed || 0;
+            const total = data.total || 0;
+            const percent = total > 0 ? Math.round((succeeded + failed) * 100 / total) : 0;
+            const bar = document.getElementById(`progress-bar-${workflowId}`);
+
+            if (bar) {
+              bar.style.width = `${percent}%`;
+              bar.innerText = `${percent}%`;
+              bar.classList.remove('bg-green-500', 'bg-red-500');
+              bar.classList.add(failed > 0 ? 'bg-red-500' : 'bg-green-500');
+            }
+          })
+          .catch(err => {
+            console.error(`Error loading progress for ${workflowId}:`, err);
+          });
+      }
+
+      function pollAllProgressBars() {
+        workflowIds.forEach(fetchProgress);
+      }
+
+      function handleAction(jobId, action) {
+        const confirmed = action === 'delete' ? confirm(`Are you sure you want to delete job '${jobId}'?`) : true;
+        if (!confirmed) return;
+
+        fetch(`/api/jobs/${jobId}/${action}`, { method: action === 'delete' ? 'DELETE' : 'POST' })
+          .then(res => res.json())
+          .then(data => {
+            alert(data.message || `${action} successful for ${jobId}`);
+            setTimeout(() => location.reload(), 500);
+          })
+          .catch(err => {
+            console.error(`Error performing ${action} on ${jobId}:`, err);
+            alert('Action failed. See console for details.');
+          });
+      }
+
+      pollAllProgressBars();
+      setInterval(pollAllProgressBars, 3000);
+    </script>
+</body>
+</html>

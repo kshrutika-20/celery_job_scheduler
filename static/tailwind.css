@@ -382,6 +382,33 @@ button[title="Delete"]:hover {
     color: #b91c1c;
 }
 
+/* Utility for icon buttons */
+.action-icon {
+  background: none;
+  border: none;
+  padding: 0 0.25rem; /* tighter spacing */
+  margin-right: 0.25rem; /* match Tailwind's mr-1 */
+  cursor: pointer;
+  line-height: 1;
+  outline: none;
+}
+
+/* Remove last margin */
+.action-icon:last-child {
+  margin-right: 0;
+}
+
+/* Remove blue box on focus */
+.action-icon:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Optional: smooth color transition like Tailwind */
+.action-icon {
+  transition: color 0.15s ease-in-out;
+}
+
 /* Padding inside table cells */
 .px-6 {
   padding-left: 1.5rem;

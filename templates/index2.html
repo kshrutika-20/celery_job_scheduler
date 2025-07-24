@@ -1,0 +1,14 @@
+<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+  <button onclick="manageJob('{{ job.id }}', 'trigger')" class="action-icon text-blue-600 hover:text-blue-900" title="Trigger Now">
+    <i class="fas fa-bolt fa-lg"></i>
+  </button>
+  <button onclick="manageJob('{{ job.id }}', 'pause')" class="action-icon text-yellow-600 hover:text-yellow-900" title="Pause">
+    <i class="fas fa-pause-circle fa-lg"></i>
+  </button>
+  <button onclick="manageJob('{{ job.id }}', 'resume')" class="action-icon text-green-600 hover:text-green-900" title="Resume">
+    <i class="fas fa-play-circle fa-lg"></i>
+  </button>
+  <button onclick="manageJob('{{ job.id }}', 'delete')" class="action-icon text-red-600 hover:text-red-900" title="Delete">
+    <i class="fas fa-trash-alt fa-lg"></i>
+  </button>
+</td>

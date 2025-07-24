@@ -29,7 +29,7 @@
 }
 
 .fa-bolt {
-  background-image: url("data:image/svg+xml,%3Csvg fill='%236B7280' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 320 512'%3E%3Cpath d='M296 160H180.3L243.2 10.3c3.7-8.8-2.7-18.3-12.3-18.3H56c-6.6 0-12 5.4-12 12v196c0 6.6 5.4 12 12 12h101.7L76.8 501.7c-3.7 8.8 2.7 18.3 12.3 18.3h175.3c6.6 0 12-5.4 12-12V172c0-6.6-5.4-12-12-12z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 320 512' fill='%236B7280'%3E%3Cpath d='M296 160H180.3L243.2 10.3c3.7-8.8-2.7-18.3-12.3-18.3H56c-6.6 0-12 5.4-12 12v196c0 6.6 5.4 12 12 12h101.7L76.8 501.7c-3.7 8.8 2.7 18.3 12.3 18.3h175.3c6.6 0 12-5.4 12-12V172c0-6.6-5.4-12-12-12z'/%3E%3C/svg%3E");
 }
 
 .fa-pause-circle {
