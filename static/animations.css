@@ -36,6 +36,17 @@
   background-image: url("data:image/svg+xml,%3Csvg fill='%236B7280' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M256 8C119.6 8 8 119.6 8 256s111.6 248 248 248 248-111.6 248-248S392.4 8 256 8zm-64 336c0 6.6-5.4 12-12 12h-24c-6.6 0-12-5.4-12-12V168c0-6.6 5.4-12 12-12h24c6.6 0 12 5.4 12 12v176zm160 0c0 6.6-5.4 12-12 12h-24c-6.6 0-12-5.4-12-12V168c0-6.6 5.4-12 12-12h24c6.6 0 12 5.4 12 12v176z'/%3E%3C/svg%3E");
 }
 
+.fa-custom-icon {
+  background-image: url("data:image/svg+xml,%3Csvg width='24px' height='24px' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolygon fill='none' stroke='currentColor' stroke-width='2' points='4 14 10 14 7 23 9 23 20 9 14 9 18 1 7 1'/%3E%3C/svg%3E");
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+
 .fa-play-circle {
   background-image: url("data:image/svg+xml,%3Csvg fill='%236B7280' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8zm-40 344V160l144 96-144 96z'/%3E%3C/svg%3E");
 }
