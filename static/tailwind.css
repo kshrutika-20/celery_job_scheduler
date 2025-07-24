@@ -12,13 +12,6 @@ body {
     padding: 2rem;
 }
 
-/* Table styling */
-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 1rem;
-}
-
 th, td {
     padding: 0.75rem;
     border-bottom: 1px solid #e5e7eb;
@@ -162,4 +155,233 @@ button {
 
 button:hover {
     background-color: #d1d5db;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f9fafb;
+    color: #1f2937;
+}
+
+.container {
+    max-width: 1280px;
+    margin-left: auto;
+    margin-right: auto;
+    padding: 2rem;
+}
+
+h1 {
+    font-size: 1.875rem;
+    font-weight: 700;
+    color: #111827;
+}
+
+.text-gray-600 {
+    color: #4b5563;
+}
+
+.shadow-md {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.rounded-lg {
+    border-radius: 0.5rem;
+}
+
+.overflow-hidden {
+    overflow: hidden;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.table th,
+.table td {
+    padding: 0.75rem 1.5rem;
+    text-align: left;
+    font-size: 0.875rem;
+    border-bottom: 1px solid #e5e7eb;
+    white-space: nowrap;
+}
+
+.table thead {
+    background-color: #f3f4f6;
+}
+
+.text-xs {
+    font-size: 0.75rem;
+}
+
+.text-sm {
+    font-size: 0.875rem;
+}
+
+.text-gray-500 {
+    color: #6b7280;
+}
+
+.text-gray-900 {
+    color: #111827;
+}
+
+.text-gray-800 {
+    color: #1f2937;
+}
+
+.text-gray-400 {
+    color: #9ca3af;
+}
+
+.font-medium {
+    font-weight: 500;
+}
+
+.font-semibold {
+    font-weight: 600;
+}
+
+.font-bold {
+    font-weight: 700;
+}
+
+.bg-white {
+    background-color: #ffffff;
+}
+
+.bg-gray-50 {
+    background-color: #f9fafb;
+}
+
+.bg-gray-100 {
+    background-color: #f3f4f6;
+}
+
+.bg-gray-200 {
+    background-color: #e5e7eb;
+}
+
+.bg-green-100 {
+    background-color: #d1fae5;
+}
+.text-green-800 {
+    color: #065f46;
+}
+
+.bg-red-100 {
+    background-color: #fee2e2;
+}
+.text-red-800 {
+    color: #991b1b;
+}
+
+.bg-gray-100 {
+    background-color: #f3f4f6;
+}
+.text-gray-800 {
+    color: #1f2937;
+}
+
+.status-dot {
+    height: 10px;
+    width: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+
+.status-scheduled, .status-dependent {
+    background-color: #3498db;
+}
+.status-paused {
+    background-color: #f1c40f;
+}
+.status-failing, .status-complete-w-errors {
+    background-color: #e74c3c;
+}
+.status-running {
+    background-color: #9b59b6;
+}
+.status-success {
+    background-color: #2ecc71;
+}
+
+.fa-spin {
+    animation: fa-spin 2s infinite linear;
+}
+
+@keyframes fa-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.progress-bar-container {
+    width: 120px;
+    height: 12px;
+    background-color: #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid #ccc;
+}
+
+.progress-bar {
+    height: 100%;
+    transition: width 0.3s ease-in-out;
+    text-align: center;
+    color: white;
+    font-size: 9px;
+    line-height: 12px;
+}
+
+.progress-bar.bg-green-500 {
+    background-color: #10b981;
+}
+
+.progress-bar.bg-red-500 {
+    background-color: #ef4444;
+}
+
+.progress-bar.bg-blue-600 {
+    background-color: #2563eb;
+}
+
+/* Button colors (neutral & consistent) */
+button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+button .fa-lg {
+    font-size: 1.25rem;
+}
+
+button[title="Trigger Now"] {
+    color: #2563eb;
+}
+button[title="Trigger Now"]:hover {
+    color: #1d4ed8;
+}
+
+button[title="Pause"] {
+    color: #ca8a04;
+}
+button[title="Pause"]:hover {
+    color: #b45309;
+}
+
+button[title="Resume"] {
+    color: #059669;
+}
+button[title="Resume"]:hover {
+    color: #047857;
+}
+
+button[title="Delete"] {
+    color: #dc2626;
+}
+button[title="Delete"]:hover {
+    color: #b91c1c;
 }
