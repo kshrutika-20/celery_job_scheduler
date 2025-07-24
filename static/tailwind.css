@@ -214,10 +214,6 @@ h1 {
     font-size: 0.75rem;
 }
 
-.text-sm {
-    font-size: 0.875rem;
-}
-
 .text-gray-500 {
     color: #6b7280;
 }
@@ -384,4 +380,135 @@ button[title="Delete"] {
 }
 button[title="Delete"]:hover {
     color: #b91c1c;
+}
+
+/* Padding inside table cells */
+.px-6 {
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+}
+.py-4 {
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+}
+
+/* Whitespace nowrap */
+.whitespace-nowrap {
+  white-space: nowrap;
+}
+
+/* Text alignment and size */
+.text-right {
+  text-align: right;
+}
+.text-sm {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+
+/* Button spacing */
+.mr-3 {
+  margin-right: 0.75rem;
+}
+
+/* Button colors */
+.text-blue-600 {
+  color: #2563eb; /* Tailwind blue-600 */
+}
+.text-blue-600:hover,
+.hover\:text-blue-900:hover {
+  color: #1e3a8a; /* Tailwind blue-900 */
+}
+
+.text-yellow-600 {
+  color: #ca8a04; /* Tailwind yellow-600 */
+}
+.text-yellow-600:hover,
+.hover\:text-yellow-900:hover {
+  color: #713f12; /* Tailwind yellow-900 */
+}
+
+.text-green-600 {
+  color: #16a34a; /* Tailwind green-600 */
+}
+.text-green-600:hover,
+.hover\:text-green-900:hover {
+  color: #14532d; /* Tailwind green-900 */
+}
+
+.text-red-600 {
+  color: #dc2626; /* Tailwind red-600 */
+}
+.text-red-600:hover,
+.hover\:text-red-900:hover {
+  color: #7f1d1d; /* Tailwind red-900 */
+}
+
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Badge styles */
+.inline-flex {
+  display: inline-flex;
+}
+
+.leading-5 {
+  line-height: 1.25rem;
+}
+
+.rounded-full {
+  border-radius: 9999px;
+}
+
+.px-2 {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+
+/* Common base styles */
+.fas {
+  font-family: "Arial", sans-serif;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  text-align: center;
+  font-weight: bold;
+  font-style: normal;
+  line-height: 1;
+}
+
+.fa-lg {
+  font-size: 1.25em;
+}
+
+.fa-spin {
+  animation: fa-spin 1s infinite linear;
+}
+
+@keyframes fa-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Specific icons using emojis or fallback text */
+.fa-sync::before {
+  content: "🔄";
+}
+
+.fa-bolt::before {
+  content: "⚡";
+}
+
+.fa-pause-circle::before {
+  content: "⏸️";
+}
+
+.fa-play-circle::before {
+  content: "▶️";
+}
+
+.fa-trash-alt::before {
+  content: "🗑️";
 }
