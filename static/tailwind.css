@@ -494,6 +494,40 @@ button[title="Delete"]:hover {
   padding-right: 0.5rem;
 }
 
+.table-container {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch; /* smooth scrolling on iOS */
+}
+
+.responsive-table {
+  width: 100%;
+  min-width: 1000px; /* ensures full width table */
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.responsive-table thead {
+  background-color: #f9fafb;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.responsive-table th,
+.responsive-table td {
+  padding: 0.75rem 1.5rem;
+  white-space: nowrap;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.responsive-table td.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+
 /* Common base styles */
 .fas {
   font-family: "Arial", sans-serif;
