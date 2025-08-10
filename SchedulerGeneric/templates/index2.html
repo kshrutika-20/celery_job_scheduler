@@ -1,99 +1,17 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Job Monitor</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-100 text-gray-800">
-  <main class="container mx-auto px-4 py-8">
-    <h1 class="text-3xl font-bold mb-6">Job Monitor</h1>
-
-    <section class="overflow-x-auto">
-      <table class="min-w-full bg-white rounded-lg shadow-lg">
-        <thead>
-          <tr class="bg-gray-200 text-left text-sm uppercase font-semibold tracking-wider">
-            <th class="py-3 px-6">Job ID</th>
-            <th class="py-3 px-6">Job Type</th>
-            <th class="py-3 px-6">Status</th>
-            <th class="py-3 px-6">Start Time</th>
-            <th class="py-3 px-6">End Time</th>
-            <th class="py-3 px-6 text-center">Progress</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for job in jobs %}
-          <tr class="border-b hover:bg-gray-50">
-            <td class="py-3 px-6 whitespace-nowrap">{{ job.job_id }}</td>
-            <td class="py-3 px-6 whitespace-nowrap">{{ job.job_type }}</td>
-            <td class="py-3 px-6 whitespace-nowrap">{{ job.status }}</td>
-            <td class="py-3 px-6 whitespace-nowrap">{{ job.start_time }}</td>
-            <td class="py-3 px-6 whitespace-nowrap">{{ job.end_time }}</td>
-            <td class="py-3 px-6 text-center">
-              {% if job.workflow_id %}
-              <div class="w-full bg-gray-200 rounded-full border border-gray-400 h-5 relative" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                <div id="progress-bar-{{ job.workflow_id }}"
-                  class="bg-green-500 h-full rounded-full text-xs text-white text-center leading-5 transition-all duration-500 ease-in-out"
-                  style="width: 0%;">
-                  0%
-                </div>
-              </div>
-              {% else %}
-              <span class="text-gray-400 italic">N/A</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </section>
-  </main>
-
-  <script>
-    const workflowIds = {{ jobs | map(attribute='workflow_id') | select | list | tojson }};
-
-    async function fetchProgress(workflowId) {
-      try {
-        const res = await fetch(`/api/progress/${workflowId}`);
-        const data = await res.json();
-
-        const succeeded = data.succeeded || 0;
-        const failed = data.failed || 0;
-        const total = data.total || 0;
-
-        const percent = total > 0 ? Math.round(((succeeded + failed) / total) * 100) : 0;
-        const bar = document.getElementById(`progress-bar-${workflowId}`);
-
-        if (bar) {
-          bar.style.width = `${percent}%`;
-          bar.innerText = `${percent}%`;
-          bar.parentElement.setAttribute('aria-valuenow', percent);
-
-          if (failed > 0) {
-            bar.classList.remove('bg-green-500');
-            bar.classList.add('bg-red-500');
-          } else {
-            bar.classList.remove('bg-red-500');
-            bar.classList.add('bg-green-500');
-          }
-        }
-      } catch (err) {
-        console.error(`Failed to fetch progress for ${workflowId}`, err);
-      }
-    }
-
-    function pollAllProgressBars() {
-      workflowIds.forEach(id => {
-        if (id) fetchProgress(id);
-      });
-    }
-
-    // Initial fetch
-    document.addEventListener('DOMContentLoaded', () => {
-      pollAllProgressBars();
-      setInterval(pollAllProgressBars, 3000);
-    });
-  </script>
-</body>
-</html>
+<header class="mb-8 flex justify-between items-start">
+    <div>
+        <h1 class="text-3xl font-bold text-gray-900">Scheduler Dashboard</h1>
+        <p class="text-gray-600 mt-1">Monitor and manage all scheduled jobs in the system.</p>
+    </div>
+    <div class="absolute top-4 right-4">
+        <button onclick="updateApiKey()" class="text-gray-500 hover:text-gray-800" title="Set API Key">
+            <!-- Local SVG icon instead of Font Awesome -->
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.527-.88 3.255.848 2.376 2.376a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.88 1.527-.848 3.255-2.376 2.376a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.527.88-3.255-.848-2.376-2.376a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.88-1.527.848-3.255 2.376-2.376.999.576 2.246.158 2.573-1.066z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+        </button>
+    </div>
+</header>
